@@ -65,8 +65,10 @@ See [architecture and limitations](docs/MS_MODE.md) for details.
 ## Libraries and documentation
 
 The radio uses allocator-free `no_std` protocol and type libraries, pure
-channel-coding algorithms, and desktop adapters for SDR, network and filesystem
-I/O. An optional C ABI exposes seven independently owned protocol components.
+channel-coding algorithms, and `std`-based application support and platform
+adapters for SDR, network and filesystem I/O. These also run in headless and
+embedded-Linux applications; they do not require a graphical desktop.
+An optional C ABI exposes seven independently owned protocol components.
 
 - [Setup: radio, MMI and audio](docs/MS_GETTING_STARTED.md)
 - [Radio configuration reference](docs/MS_CONFIG.md)

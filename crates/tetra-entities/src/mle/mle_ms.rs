@@ -1,4 +1,4 @@
-//! Desktop configuration, logging and SAP translation for the portable MS MLE.
+//! Application configuration, logging and SAP translation for the portable MS MLE.
 //! Selection, survey, service and wire/routing decisions belong to MleCore.
 
 use crate::{MessageQueue, TetraEntityTrait};

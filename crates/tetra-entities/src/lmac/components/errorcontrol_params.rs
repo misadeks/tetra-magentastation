@@ -2,7 +2,7 @@ use tetra_saps::tmv::enums::logical_chans::LogicalChannel;
 
 pub use tetra_phy_core::errorcontrol_params::*;
 
-/// Map desktop channel identities to the authoritative portable parameters.
+/// Map application channel identities to the portable parameters.
 pub fn get_params(lchan: LogicalChannel) -> &'static ErrorControlParams {
     match lchan {
         LogicalChannel::Bsch => &BSCH_PARAMS,

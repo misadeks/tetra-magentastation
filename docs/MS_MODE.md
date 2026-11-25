@@ -10,21 +10,27 @@ ETSI TS 100 392-2 V3.10.1 (2023-03).
 ```text
 Slint MMI or another application (UI, microphone/speaker, ACELP)
     | control / telemetry / speech: binary WebSocket JSON
-Desktop adapters (tetra-entities, tetra-config)
+Application/platform adapters (tetra-entities, tetra-config)
     | events and actions
 tetra-ms-core (LLC, MAC/RA/reassembly, MM, MLE, CMCE, SDS)
     |
 tetra-ms-types (TDMA, identities, packed bits, frequencies)
 
-Desktop PHY/LMAC -> tetra-phy-core (logical-channel coding)
+Host PHY/LMAC -> tetra-phy-core (logical-channel coding)
     |
 SoapySDR: receive downlink, transmit granted uplink bursts
 ```
 
-The protocol state machines live in the allocator-free core. Desktop adapters
+The protocol state machines live in the allocator-free core. Application adapters
 translate SAPs/buffers, track receipts, queue speech, log events, and handle
 configuration, threads and drivers. The optional C ABI exposes independently
 owned protocol components; it is not another implementation of the stack.
+
+Portable types in `tetra-ms-types` need neither `std` nor an allocator by default.
+The application-support crates use `std`, allocating buffers and shared metadata;
+they are not GUI-specific and can run on headless or embedded-Linux hosts.
+An OS-less target supplies its own HAL and calls the portable libraries.
+See the [dependency boundary](PORTABLE_MS.md#portability-boundary).
 
 `MessageRouter` takes its protocol clock from recovered downlink slots.
 While unsynchronized it can service configuration/state management, but does
@@ -60,10 +66,10 @@ watermarks must be measured on the target setup.
 
 ## Source map
 
-Desktop paths below are relative to `crates/tetra-entities/src`; portable paths
+Adapter paths below are relative to `crates/tetra-entities/src`; portable paths
 are relative to `crates`:
 
-| Layer | Desktop adapter | Portable implementation |
+| Layer | Application/platform adapter | Portable implementation |
 | --- | --- | --- |
 | LLC | `llc/llc_ms.rs`, `llc/ms_adapter.rs` | `tetra-ms-core/src/llc.rs` |
 | MAC/RA | `umac/umac_ms.rs`, `umac/subcomp/ms_*.rs` | `tetra-ms-core/src/mac/`, `random_access.rs`, `reassembly.rs` |

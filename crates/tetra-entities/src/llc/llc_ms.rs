@@ -1,4 +1,4 @@
-//! Desktop entity boundary for the authoritative portable MS LLC implementation.
+//! Application entity boundary for the portable MS LLC implementation.
 use tetra_config::magentastation::SharedConfig;
 use tetra_core::{TdmaTime, tetra_entities::TetraEntity};
 use tetra_saps::SapMsg;

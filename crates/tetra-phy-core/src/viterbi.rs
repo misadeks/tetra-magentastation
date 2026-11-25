@@ -299,7 +299,7 @@ impl TetraCodecViterbiDecoder {
 
 /// Decode at most 864 SB1 output symbols using caller-owned traceback storage.
 ///
-/// Only `sym_count * 4` input entries are consumed, matching the desktop entry
+/// Only `sym_count * 4` input entries are consumed, matching the application entry
 /// point. No large scratch array is constructed in this function.
 pub fn dec_sb1_with_workspace<const SYMBOLS: usize>(
     in_buf: &[u8],

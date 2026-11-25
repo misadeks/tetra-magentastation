@@ -4,7 +4,7 @@
 //! values are validated separately; the state machine never calls platform code.
 //!
 //! `CmceCore` owns the bounded entity, downlink decoding, call orchestration and
-//! traffic attribution. Desktop integration translates its actions to SAPs.
+//! traffic attribution. Application integration translates its actions to SAPs.
 use tetra_ms_types::{BitError, BitView, PackedBits, SsiType, TdmaTime, TetraAddress};
 
 pub mod downlink;

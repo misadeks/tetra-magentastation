@@ -1,9 +1,9 @@
 # Portable MS MLE
 
 `tetra-ms-core::mle` owns the implemented MS Mobile Link Entity protocol.
-`tetra-entities::mle::mle_ms` is its desktop adapter, not another state machine.
+`tetra-entities::mle::mle_ms` is its `std`-based application adapter, not another state machine.
 The portable module depends only on `tetra-ms-types`; it requires neither
-`std`, `alloc`, desktop PDU/SAP crates, a logger, nor a clock.
+`std`, `alloc`, application PDU/SAP crates, a logger, nor a clock.
 
 ## Calling the component
 
@@ -15,7 +15,7 @@ Policy slices are borrowed only during `handle`, not retained.
 
 Drain `pop_action()` after successful events. Actions describe retunes, MAC
 configuration, MM/CMCE service notifications, survey results, and uplink/downlink
-data. The desktop adapter translates these into SAP messages, preserves
+data. The application adapter translates these into SAP messages, preserves
 transmission reporters/channel-allocation metadata, and logs explicit errors.
 
 The PHY/caller owns time and supplies `Dwell` expiry and `Monitor` heartbeat
@@ -47,7 +47,7 @@ not choose these defaults. `MleState`, `pending_actions()` and the target-specif
 
 Both acknowledged and unacknowledged downlinks retain identical routing.
 SNDCP deliberately retains the existing CMCE destination until a separate SNDCP
-entity exists. Desktop deliveries preserve the original BitBuffer window and
+entity exists. Application deliveries preserve the original BitBuffer window and
 cursor representation, including the consumed discriminator.
 
 ## Bounds and errors
@@ -80,11 +80,11 @@ Malformed/truncated discriminators and broadcast PDUs return explicit errors.
 Existing unsupported internal MLE PDUs and management traffic return
 `UnsupportedMlePdu` / `UnsupportedManagement` without forwarding. Restoration,
 handover, network-broadcast interpretation and those management protocols are
-not implemented. TLMC/TLPD input primitives remain desktop stubs.
-The desktop adapter logs rejected events and
+not implemented. TLMC/TLPD input primitives remain application-adapter stubs.
+The application adapter logs rejected events and
 marks rejected uplink reporters discarded.
 
-### Remaining desktop ownership
+### Application-adapter responsibilities
 
 Only configuration/codeplug enumeration, logging, BitBuffer representation,
 SAP representation and opaque reporter/channel-allocation correlation remain.

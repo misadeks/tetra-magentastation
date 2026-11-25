@@ -31,7 +31,7 @@ hints that are not consumed by the radio.
 `backend = "SoapySdr"` opens an SDR. `backend = "None"` opens no PHY and serves
 offline management only: no recovered time, registration, calls or speech.
 Omit `[phy_io.soapysdr]` for the offline backend. Native SoapySDR linkage is
-still needed by the desktop executable.
+still needed by the `magentastation` executable, including headless deployments.
 
 ### `[phy_io.soapysdr]`
 
@@ -162,7 +162,7 @@ dwell_ms = 800
 
 All lists combine into a deduplicated candidate sequence, preserving programmed
 order. Automatic acquisition camps on a suitable cell; it does not measure all
-candidates and select the strongest. The desktop PHY advances empty-carrier
+candidates and select the strongest. The SoapySDR PHY adapter advances empty-carrier
 scanning through its fixed scan-dwell heartbeat, not a per-list `dwell_ms` timer.
 Treat `dwell_ms` as a stored hint, not an exact timing control.
 
@@ -193,7 +193,7 @@ Manual surveys use the same candidates and report results through
 ### Carrier overrides
 
 `[[carrier_override]]` stores per-carrier hints for applications. Current
-desktop radio selection **does not consume these overrides**: `rx_only` is
+radio selection **does not consume these overrides**: `rx_only` is
 not a TX inhibit, `colour_code` is not a camp lock, and the per-carrier duplex
 hints do not override received SYSINFO. Use `[duplex_table]` for the implemented
 spacing override.

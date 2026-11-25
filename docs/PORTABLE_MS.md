@@ -14,7 +14,7 @@ completion, configuration and action routing.
 Default portable builds use neither `std` nor `alloc`, sockets, filesystem,
 audio, a logger, locks or an OS scheduler. Optional `desktop-codecs` on types
 enables serde/bitcode representations; `std` enables host conveniences/examples.
-Desktop adapters own SAP/BitBuffer conversion, logging, RNG, reporter sidecars,
+Application adapters own SAP/BitBuffer conversion, logging, RNG, reporter sidecars,
 speech FIFOs, TOML and platform I/O. See the [source map](MS_MODE.md#source-map).
 
 ## Dependencies
@@ -33,6 +33,29 @@ tetra-core   -> tetra-ms-types [desktop-codecs]
 
 `tetra-ms-ffi` is optional: Rust callers can depend directly on the core.
 `tetra-phy-core` has no runtime dependencies.
+
+## Portability boundary
+
+| Layer | Dependencies and role |
+| --- | --- |
+| `tetra-ms-types`, `tetra-ms-core`, `tetra-phy-core` | Default builds are `no_std` and allocator-free; protocol types, state machines and coding have no OS or device dependency |
+| `tetra-core` | `std`-based application support: allocating `BitBuffer`, shared atomic receipts, logging and metadata; addresses and TDMA types reexport `tetra-ms-types`, and frequency arithmetic delegates to it |
+| `tetra-saps`, `tetra-pdus`, `tetra-config` | Application SAP/PDU representations and TOML/codeplug support; they depend on `tetra-core` and other `std`-based libraries |
+| `tetra-entities` and `magentastation` | Host/platform integration: entity routing, sockets, threads, persistence and SoapySDR sample I/O |
+
+`std`-based does not mean graphical-desktop-only. These crates support headless
+and embedded-Linux processes as well as workstation applications. Some wire
+vocabulary is shared, but its allocating application representation is distinct
+from the bounded core representation.
+
+The existing feature name `desktop-codecs` is retained for compatibility. It
+adds serialization through the workspace's serde/bitcode dependencies; it is
+not the default allocator-free build and does not add a GUI or another protocol
+implementation. The `desktop` Rust example name is also retained.
+
+On an OS-less target, depend on the portable libraries and provide HAL/sample
+transport, scheduling, entropy and other platform services outside them.
+Using `no_std` libraries does not by itself supply a device driver.
 
 ## Rust components
 
@@ -73,7 +96,7 @@ transport must later provide another disposition for that attempt. An early
 network ACK can unblock stop-and-wait before local bookkeeping catches up;
 it must not invent a local transmitted receipt.
 
-MAC uses numeric `u32` receipt handles. Desktop atomic/heap reporters are
+MAC uses numeric `u32` receipt handles. Application atomic/heap reporters are
 sidecars, not protocol payloads. Audio FIFOs also remain outside CMCE calls.
 Reset cancels pending work, clears state in place and advances the receipt
 epoch; the adapter must notify its callers and discard old transport work.
@@ -114,9 +137,9 @@ append an FCS. Empty FCS calculation returns the all-ones initial value;
 truncated received FCS is an error. These are behavior details callers should
 not replace with assumptions.
 
-### Desktop and embedded Rust callers
+### Host and embedded Rust callers
 
-The desktop LLC adapter is
+The application LLC adapter is
 [`llc/ms_adapter.rs`](../crates/tetra-entities/src/llc/ms_adapter.rs).
 It preserves SAP metadata and bridges transport receipts without owning retry
 or sequence decisions. A minimal host caller is:
@@ -243,7 +266,7 @@ audio/DMA buffers and task stacks.
 
 Initialize `tetra_phy_core::errorcontrol::Workspace` and
 `tetra_phy_core::viterbi::Sb1Workspace` in caller-owned storage with their
-in-place `initialize` functions. Desktop adapters own boxed workspaces outside
+in-place `initialize` functions. Host adapters own boxed workspaces outside
 the portable crate. Viterbi converts hard bits during metric accumulation
 without a separate soft-bit array.
 
@@ -280,7 +303,7 @@ cargo build -p tetra-ms-core -p tetra-ms-ffi -p tetra-phy-core --no-default-feat
 cargo fmt --all -- --check
 ```
 
-Desktop tests require native SoapySDR linkage, but the offline fixtures use no
+Application tests require native SoapySDR linkage, but the offline fixtures use no
 device. Windows child-process tests also need its DLL directory on `PATH`:
 
 ```sh

@@ -1,7 +1,7 @@
 //! Caller-driven MS MAC policy and bounded state. Receipts are opaque caller
 //! tokens: the core returns them; only the transport adapter reports delivery.
 //! Tokens must be `Copy`: protocol state cannot own a destructor, and no token
-//! cloning is performed. Desktop adapters use `u32` handles, never reporters.
+//! cloning is performed. Application adapters use `u32` handles, never reporters.
 //!
 //! Use [`MsMac`] for fixed-width `u32` receipt tokens. Supply recovered downlink
 //! time to [`Mac::tick`], decoded SYNC/SYSINFO to their adoption methods, and
@@ -426,9 +426,9 @@ pub struct ResourceEvent<R: Copy> {
 /// Receipt owners with destructors cannot enter protocol storage:
 /// ```compile_fail
 /// use tetra_ms_core::mac::Mac;
-/// struct DesktopReceipt;
-/// impl Drop for DesktopReceipt { fn drop(&mut self) {} }
-/// let _ = Mac::<DesktopReceipt>::default();
+/// struct ApplicationReceipt;
+/// impl Drop for ApplicationReceipt { fn drop(&mut self) {} }
+/// let _ = Mac::<ApplicationReceipt>::default();
 /// ```
 pub struct Mac<R: Copy> {
     pub dltime: TdmaTime,

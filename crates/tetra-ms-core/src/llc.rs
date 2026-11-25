@@ -104,7 +104,7 @@ pub enum LlcEvent<'a> {
         receipt: Receipt,
         feedback: TxFeedback,
     },
-    /// Corresponds to the desktop router's end-of-tick, not a wall-clock timer.
+    /// Corresponds to the application router's end-of-tick, not a wall-clock timer.
     Tick,
 }
 

@@ -6,7 +6,7 @@ use tetra_saps::tp::TpUnitdataInd;
 use super::{errorcontrol_params, scrambler, tch_reorder};
 use tetra_phy_core::errorcontrol as coding;
 
-/// Desktop primitive/buffer adapter for the portable control-channel encoder.
+/// Application primitive/buffer adapter for the portable control-channel encoder.
 pub fn encode_cp(mut prim: TmvUnitdataReq) -> BitBuffer {
     let lchan = prim.logical_channel;
     assert!(lchan.is_control_channel() && lchan != LogicalChannel::Aach);
@@ -50,7 +50,7 @@ pub fn decode_cp(lchan: LogicalChannel, prim: TpUnitdataInd, default_scramb_code
     (Some(result), crc_ok)
 }
 
-/// Preserve desktop padding, cursor reset and stolen-half-slot selection.
+/// Preserve application-buffer padding, cursor reset and stolen-half-slot selection.
 pub fn encode_tp(mut prim: TmvUnitdataReq, blk_num: u8) -> BitBuffer {
     let params = errorcontrol_params::get_params(prim.logical_channel);
     prim.mac_block.seek(0);

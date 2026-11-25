@@ -1,4 +1,4 @@
-/// Existing logical-channel coding parameters, independent of desktop primitives.
+/// Logical-channel coding parameters, independent of application SAP primitives.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ErrorControlParams {
     // pub name:           &'static str,
@@ -56,7 +56,7 @@ pub const SCH_HU_PARAMS: ErrorControlParams = ErrorControlParams {
 
 /// Parameters for TCH/S (full-rate 7.2 kbit/s speech).
 ///
-/// These legacy generic dimensions are retained for desktop channel lookup.
+/// These legacy generic dimensions are retained for application channel lookup.
 /// Speech coding uses the per-class CRC and continuous encoder in
 /// [`crate::errorcontrol`], not the generic control-channel pipeline.
 pub const TCH_S_PARAMS: ErrorControlParams = ErrorControlParams {

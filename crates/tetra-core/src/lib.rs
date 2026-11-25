@@ -1,6 +1,8 @@
-//! Desktop utilities and shared wire vocabulary for TETRA MagentaStation.
+//! `std`-based application support and shared wire vocabulary for TETRA MagentaStation.
 //!
-//! This crate provides fundamental types and utilities used across the TETRA stack
+//! Portable address and TDMA types are reexported from `tetra-ms-types`.
+//! Allocating buffers, shared receipts and logging serve host applications,
+//! including headless and embedded-Linux processes; no graphical UI is required.
 
 /// Git version string, set at compile time
 pub const GIT_VERSION: &str = git_version::git_version!(fallback = "unknown");

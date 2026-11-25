@@ -1,4 +1,4 @@
-//! MM wire layouts extracted from the desktop PDU implementations.
+//! MM wire layouts shared with the application PDU representations.
 
 use super::{Config, Error, GROUP_CLASS_OF_USAGE, GroupList, GroupOperation, GroupRequest, GroupSet, LocationUpdateType, MAX_GROUPS};
 use tetra_ms_types::bits::{BitView, PackedBits};

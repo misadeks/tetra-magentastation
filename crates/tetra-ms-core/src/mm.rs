@@ -6,7 +6,7 @@
 //!
 //! Owns the registration/temporary-registration conditions, T351 retries, N351
 //! rejection lockout, standalone group reconciliation/T353, and bounded ITSI
-//! detach drain from the desktop MS implementation (TS 100 392-2, clause 16).
+//! detach drain from the MS application implementation (TS 100 392-2, clause 16).
 //! Group membership is limited to 63 unique GSSIs; an on-air request or response
 //! also has at most 63 repeated elements. Confirmations preserve wire order,
 //! while the authoritative address-filter set is sorted and deduplicated.
@@ -14,7 +14,7 @@
 //! Compatibility includes expiry on the slot after T351/T353 reaches zero,
 //! minimal initial demands followed by standalone group affiliation, and minimal
 //! retry demands even for an infrastructure-command-triggered registration.
-//! Unsolicited accepts and repeated downlink groups retain desktop behavior.
+//! Unsolicited accepts and repeated downlink groups retain application behavior.
 //! This is not a new implementation of previously unsupported security,
 //! D-LOCATION-UPDATE-PROCEEDING, or network-initiated group attachment procedures:
 //! those inputs return [`Error::UnsupportedPdu`] rather than changing state.

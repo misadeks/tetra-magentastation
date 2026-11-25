@@ -1,4 +1,4 @@
-//! Desktop SAP/receipt translation. No LLC sequence or retry decisions live here.
+//! Application SAP/receipt translation. No LLC sequence or retry decisions live here.
 use std::collections::BTreeMap;
 
 use tetra_core::{BitBuffer, Sap, TdmaTime, TxReporter, TxState, tetra_entities::TetraEntity};

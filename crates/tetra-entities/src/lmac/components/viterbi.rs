@@ -1,6 +1,6 @@
 pub use tetra_phy_core::viterbi::{SoftBit, num_states};
 
-/// Legacy desktop entry point. Its large traceback workspace is heap-owned,
+/// Legacy application entry point. Its large traceback workspace is heap-owned,
 /// outside the portable decoder and its call stack.
 pub fn dec_sb1(in_buf: &[u8], out_buf: &mut [u8], sym_count: usize) {
     assert!(sym_count <= 864, "sym_count too large");
@@ -12,7 +12,7 @@ pub fn dec_sb1(in_buf: &[u8], out_buf: &mut [u8], sym_count: usize) {
         .unwrap_or_else(|_| panic!("viterbi_dec_sb1_wrapper: invalid input"));
 }
 
-/// Desktop allocation adapter for the portable caller-storage decoder.
+/// Host allocation adapter for the portable caller-storage decoder.
 pub struct ViterbiDecoder<const N: usize>(tetra_phy_core::viterbi::ViterbiDecoder<N>);
 
 impl<const N: usize> ViterbiDecoder<N> {

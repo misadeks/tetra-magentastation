@@ -139,7 +139,7 @@ name = "primary"
 mode = "List"
 frequencies = [439825000, 439850000]
 dwell_ms = 800
-# Stored dwell hint; the desktop PHY currently uses its scan-dwell heartbeat,
+# Stored dwell hint; the SoapySDR PHY adapter uses its scan-dwell heartbeat,
 # not a separate timer for this value.
 
 # Range-based list example (uncomment to add to the scan set). The range is a

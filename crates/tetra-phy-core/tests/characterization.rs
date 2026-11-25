@@ -1,4 +1,4 @@
-//! Golden vectors captured from the desktop algorithms before extraction.
+//! Golden vectors captured from the application coding implementation.
 use tetra_phy_core::convenc::{self, ConvEncState, RcpcPunctMode, SpeechConvEncState};
 use tetra_phy_core::errorcontrol::{self, CodingError};
 use tetra_phy_core::errorcontrol_params::*;

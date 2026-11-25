@@ -1,7 +1,7 @@
-//! The existing type-1/type-5 bit pipelines, without desktop buffer ownership.
+//! The type-1/type-5 bit pipelines, without application buffer ownership.
 //!
 //! Input and output lengths are checked before either output is modified.
-//! Failed CRCs still return decoded bits, matching the desktop implementation.
+//! Failed CRCs still return decoded bits, matching the application implementation.
 //! These functions do not choose channels, acquire scrambling codes, or schedule
 //! blocks; those decisions remain with their callers.
 
@@ -197,7 +197,7 @@ pub fn encode_speech_channel(input: &[u8; 274], scrambling_code: u32, output: &m
 /// Encode a TCH/S frame in codec order.
 ///
 /// Compatibility: short inputs are zero-padded without reordering, exactly as
-/// the desktop encoder did. Full 274-bit inputs are reordered before coding.
+/// the application encoder did. Full 274-bit inputs are reordered before coding.
 /// A stolen half-slot is the caller-selected second 216 bits of the full output.
 pub fn encode_tch_s(input: &[u8], scrambling_code: u32, output: &mut [u8; 432]) -> Result<(), CodingError> {
     if input.len() > 274 {

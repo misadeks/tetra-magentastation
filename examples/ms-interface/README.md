@@ -9,7 +9,7 @@ These strings identify the wire contract independently of the executable name.
 
 **The stack is a client. The external application listens on two WebSocket
 servers.** Configure them with `[command]` and `[telemetry]` respectively.
-The desktop executable uses UTF-8 JSON carried in **binary WebSocket frames**,
+The `magentastation` executable uses UTF-8 JSON carried in **binary WebSocket frames**,
 not JSON text frames or a binary bitcode payload. The crates also retain
 bitcode codecs for library users; the executable's workers use JSON.
 

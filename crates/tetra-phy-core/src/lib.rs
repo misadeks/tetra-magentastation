@@ -7,7 +7,7 @@
 //! [`errorcontrol`] checks input dimensions and bit values before writing output;
 //! [`viterbi::ViterbiDecoder::decode_into`] reports insufficient caller storage.
 //! The low-level CRC, puncturing, interleaving and encoder entry points retain
-//! their original desktop preconditions and panic/truncation behavior.
+//! their existing preconditions and panic/truncation behavior.
 //!
 //! # Storage and scope
 //!
@@ -29,7 +29,7 @@
 //! [`viterbi::dec_sb1_with_workspace`] supports at most 864 decoded bits, requires
 //! caller-owned workspace and converts hard bits during metric calculation,
 //! without a soft-bit array. No portable decoding API implicitly constructs
-//! large scratch. Legacy desktop signatures allocate their workspace outside
+//! large scratch. Legacy application signatures allocate their workspace outside
 //! this crate.
 //!
 //! AACH retains the existing single-bit error correction, not full RM decoding.

@@ -3,7 +3,7 @@ use tetra_ms_core::reassembly::{FragmentError, MsReassembly};
 
 use crate::umac::subcomp::defrag::{DefragBuffer, DefragBufferState};
 
-/// Desktop allocation/logging boundary for the portable MS reassembler.
+/// Application allocation/logging boundary for the portable MS reassembler.
 pub struct MsDefrag {
     core: MsReassembly,
 }

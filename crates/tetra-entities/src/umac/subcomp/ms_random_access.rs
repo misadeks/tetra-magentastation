@@ -1,4 +1,4 @@
-//! Desktop PDU conversion and entropy source for portable random access.
+//! Application PDU conversion and entropy source for portable random access.
 use tetra_core::TdmaTime;
 use tetra_ms_core::random_access as portable;
 use tetra_pdus::umac::enums::access_assign_ul_usage::AccessAssignUlUsage;

@@ -143,7 +143,7 @@ impl MsReassembly {
         Ok(replaced)
     }
 
-    /// Overflow aborts the chain, matching the desktop's historical behavior.
+    /// Overflow aborts the chain, matching the application reassembly behavior.
     pub fn next(&mut self, now: TdmaTime, bits: BitView<'_>, last: bool) -> Result<(), FragmentError> {
         let index = Self::index(now)?;
         let slot = &mut self.slots[index];

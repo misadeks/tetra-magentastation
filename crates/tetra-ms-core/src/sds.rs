@@ -100,7 +100,7 @@ pub enum SdsAction {
 }
 
 /// All 256 on-air references are representable; reuse replaces the previous
-/// destination, matching the desktop MS's historical reference-keyed map.
+/// destination, matching the MS application's reference-keyed map.
 pub struct SdsCore {
     outstanding: [Option<u32>; 256],
     actions: Queue<SdsAction, ACTION_CAPACITY>,

@@ -33,7 +33,7 @@ use tetra_ms_core::mm::{
 #[cfg(test)]
 use tetra_ms_core::mm::{DETACH_DRAIN_SLOTS, N351_MAX_SYSTEM_REJECTIONS, T351_TIMEOUT_SLOTS, T353_TIMEOUT_SLOTS};
 
-/// Desktop configuration/control/telemetry adapter. Protocol state lives in MmCore.
+/// Application configuration/control/telemetry adapter. Protocol state lives in MmCore.
 pub struct MmMs {
     config: SharedConfig,
     telemetry: Option<TelemetrySink>,
