@@ -1,5 +1,7 @@
 # TETRA MagentaStation
 
+<img src="contrib/logo/magentastation.svg" alt="MagentaStation emblem" width="160" />
+
 An **MS-only TETRA mobile-station stack** with portable protocol/PHY libraries
 and desktop radio, control, telemetry, provisioning and audio-transport adapters.
 MagentaStation is derived from

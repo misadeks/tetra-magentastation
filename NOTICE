@@ -21,6 +21,10 @@ Modifications for this derivative:
   runtime selection/configuration and BS-only tests/examples.
 - Rename the desktop application and revise documentation/CI for MS-only use.
 - Retain existing external schema identifiers and upstream wire vocabulary.
+- Recolor the original emblem-only contrib/logo/bluestation_noname.svg to
+  #ff0066 as contrib/logo/magentastation.svg. Original geometry, transforms,
+  transparency and Inkscape metadata are retained; no new artwork or wordmark
+  is claimed.
 
 Retained upstream acknowledgments:
 - Harald Welte and the Osmocom community for the foundational osmocom-tetra work.
