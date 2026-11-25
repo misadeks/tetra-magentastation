@@ -316,6 +316,10 @@ and write-back replaces comments/formatting, so set appropriate file permissions
 Write failures return a negative acknowledgement; the radio account must be
 able to write the file it loaded.
 
+`SetConfig` logs omit the submitted TOML. Rejected TOML reports syntax/field-value
+errors with line and column, without source excerpts; other validation failures
+use a generic diagnostic so supplied values cannot reach logs or replies.
+
 `ApplyConfig` starts a best-effort detach drain and exits **75** only when a
 structural change is pending. A supervisor must start the process again.
 With nothing pending it acknowledges without restarting. Offline management

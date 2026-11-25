@@ -145,6 +145,28 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     Ok(cfg)
 }
 
+/// Summarize a configuration error for logs/replies without echoing input values.
+pub fn config_error_summary(toml_str: &str, error: &(dyn std::error::Error + 'static)) -> String {
+    let Some(error) = error.downcast_ref::<toml::de::Error>() else {
+        return "configuration validation failed".to_string();
+    };
+    let mut summary = "invalid TOML syntax or field value".to_string();
+    if let Some(span) = error.span() {
+        let (line, column) =
+            toml_str
+                .char_indices()
+                .take_while(|(offset, _)| *offset < span.start)
+                .fold(
+                    (1usize, 1usize),
+                    |(line, column), (_, ch)| {
+                        if ch == '\n' { (line + 1, 1) } else { (line, column + 1) }
+                    },
+                );
+        summary.push_str(&format!(" at line {line}, column {column}"));
+    }
+    summary
+}
+
 /// Build `SharedConfig` from any reader.
 pub fn from_reader<R: Read>(reader: R) -> Result<StackConfig, Box<dyn std::error::Error>> {
     let mut contents = String::new();
@@ -412,6 +434,16 @@ issi = 1000001
 subscriber_class = 1
 attach_groups = []
 "#;
+
+    #[test]
+    fn config_error_summary_preserves_character_location_without_source() {
+        let input = "# comment\npassword = \"\u{e9}\" @\n";
+        let error = from_toml_str(input).unwrap_err();
+        assert_eq!(
+            config_error_summary(input, error.as_ref()),
+            "invalid TOML syntax or field value at line 2, column 16"
+        );
+    }
 
     #[test]
     fn to_toml_string_roundtrips_ms_config() {

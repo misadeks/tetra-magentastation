@@ -1354,12 +1354,13 @@ impl MmMs {
         let parsed = match tetra_config::magentastation::from_toml_str(&toml) {
             Ok(cfg) => cfg,
             Err(e) => {
-                tracing::warn!("MM(MS): SetConfig rejected invalid configuration: {e}");
+                let summary = tetra_config::magentastation::config_error_summary(&toml, e.as_ref());
+                tracing::warn!("MM(MS): SetConfig rejected invalid configuration: {summary}");
                 self.respond(ControlResponse::Management(ManagementResponse::Ack {
                     handle,
                     accepted: false,
                     restart_required: self.restart_required,
-                    message: format!("configuration rejected: {e}"),
+                    message: format!("configuration rejected: {summary}"),
                 }));
                 return;
             }
@@ -4448,22 +4449,53 @@ order = 2\n"
         let (mut mm, _source, dispatcher) = ms_mm_wired();
         let mut q = MessageQueue::new();
 
-        let path = std::env::temp_dir().join(format!("tetra-ms-badcfg-{}.toml", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let path = std::env::temp_dir().join(format!("tetra-ms-badcfg-{}.toml", uuid::Uuid::new_v4()));
         let restart_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let is_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         mm.set_management_context(path.clone(), restart_requested, is_running);
 
-        dispatcher.send(ControlCommand::Management(ManagementCommand::SetConfig {
-            handle: 83,
-            toml: "this = is not = valid toml {{{".to_string(),
-        }));
-        mm.tick_start(&mut q, TdmaTime::default());
-
-        let (handle, accepted, restart_required) = last_mgmt_ack(&dispatcher);
-        assert_eq!(handle, 83);
-        assert!(!accepted, "invalid config rejected");
-        assert!(!restart_required);
+        let credential_section = "\n[command]\nhost = \"127.0.0.1\"\nport = 9102\nusername = \"test\"\n";
+        let invalid = [
+            format!("{MS_TOML}{credential_section}password = \"credential-log-test-secret\n"),
+            format!("{MS_TOML}{credential_section}password = [\"credential-log-test-secret\"]\n"),
+            MS_TOML.replace("stack_mode = \"Ms\"", "stack_mode = \"credential-log-test-secret\""),
+            MS_TOML.replace("config_version = \"0.6\"", "config_version = \"credential-log-test-secret\""),
+        ];
+        for level in [tracing::Level::WARN, tracing::Level::DEBUG] {
+            for (index, toml) in invalid.iter().enumerate() {
+                let logs = crate::test_utils::capture_logs(level, || {
+                    dispatcher.send(ControlCommand::Management(ManagementCommand::SetConfig {
+                        handle: 83,
+                        toml: toml.clone(),
+                    }));
+                    mm.tick_start(&mut q, TdmaTime::default());
+                });
+                assert!(logs.contains("WARN"));
+                assert!(logs.contains("SetConfig rejected invalid configuration"));
+                assert!(!logs.contains("credential-log-test-secret"));
+                let response = dispatcher.try_recv_responses().into_iter().next().expect("rejection response");
+                let crate::net_control::ControlResponse::Management(crate::management::ManagementResponse::Ack {
+                    handle,
+                    accepted,
+                    restart_required,
+                    message,
+                }) = response
+                else {
+                    panic!("expected management acknowledgement");
+                };
+                assert_eq!(handle, 83);
+                assert!(!accepted, "invalid config rejected");
+                assert!(!restart_required);
+                assert!(!message.contains("credential-log-test-secret"));
+                if index < 3 {
+                    assert!(message.contains("invalid TOML"));
+                    assert!(message.contains("line "));
+                    assert!(message.contains("column "));
+                } else {
+                    assert!(message.contains("configuration validation failed"));
+                }
+            }
+        }
         assert!(!path.exists(), "no file written for rejected config");
         assert!(!mm.runtime_snapshot().restart_required);
     }

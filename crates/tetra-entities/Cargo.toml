@@ -33,3 +33,6 @@ uuid = { workspace = true }
 md5 = "0.7"
 base64 = "0.22"
 chrono = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

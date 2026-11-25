@@ -92,7 +92,11 @@ impl<T: NetworkTransport> ControlWorker<T> {
             let codec = ControlCodecJson;
             match codec.decode_command(&msg.payload) {
                 Ok(command) => {
-                    tracing::debug!("command received: {:?}", command);
+                    if let ControlCommand::Management(crate::management::ManagementCommand::SetConfig { handle, .. }) = &command {
+                        tracing::debug!(handle, "SetConfig command received");
+                    } else {
+                        tracing::debug!("command received: {:?}", command);
+                    }
                     self.dispatch_command(command);
                 }
                 Err(e) => {
@@ -326,6 +330,58 @@ mod tests {
         use crate::management::ManagementCommand;
         let cmd = ControlCommand::Management(ManagementCommand::GetState { handle: 9 });
         assert_eq!(ControlWorker::<MockTransport>::route_control_command(&cmd), TetraEntity::Mm);
+    }
+
+    #[test]
+    fn test_set_config_logs_omit_passwords_and_preserve_persistence() {
+        use crate::TetraEntityTrait;
+        use crate::management::{ManagementCommand, ManagementResponse};
+        use crate::mm::mm_ms::MmMs;
+        use tetra_config::magentastation::{SharedConfig, from_toml_str, to_toml_string};
+
+        let baseline = include_str!("../../../../example_config/config-offline.toml");
+        let cfg = from_toml_str(baseline).expect("valid offline configuration");
+        let (dispatcher, endpoint) = make_control_link();
+        let mut mm = MmMs::new(SharedConfig::from_parts(cfg.clone(), None), None, Some(endpoint));
+        let path = std::env::temp_dir().join(format!("tetra-ms-log-test-{}.toml", uuid::Uuid::new_v4()));
+        mm.set_management_context(
+            path.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        let mut incoming = cfg;
+        incoming.control.as_mut().unwrap().credentials = Some(("test".to_string(), "control-log-test-secret".to_string()));
+        incoming.telemetry.as_mut().unwrap().credentials = Some(("test".to_string(), "telemetry-log-test-secret".to_string()));
+        let toml = to_toml_string(&incoming).unwrap();
+        let mut mock = MockTransport::new();
+        mock.push_inbound(ControlCodecJson.encode_command(&ControlCommand::Management(ManagementCommand::SetConfig { handle: 501, toml })));
+        let mut dispatchers = HashMap::new();
+        dispatchers.insert(TetraEntity::Mm, dispatcher);
+        let mut worker = ControlWorker::new(dispatchers, mock);
+
+        let logs = crate::test_utils::capture_logs(tracing::Level::DEBUG, || {
+            worker.try_connect();
+            worker.poll_commands();
+            mm.drive_offline_control(&mut crate::MessageQueue::new());
+            worker.collect_responses();
+        });
+
+        let written = std::fs::read_to_string(&path).expect("configuration persisted");
+        std::fs::remove_file(&path).expect("remove test configuration");
+        assert!(written.contains("control-log-test-secret"));
+        assert!(written.contains("telemetry-log-test-secret"));
+        assert!(logs.contains("SetConfig"));
+        assert!(!logs.contains("control-log-test-secret"));
+        assert!(!logs.contains("telemetry-log-test-secret"));
+        let response = ControlCodecJson.decode_response(&worker.transport.sent_payloads()[0]).unwrap();
+        assert!(matches!(
+            response,
+            ControlResponse::Management(ManagementResponse::Ack {
+                handle: 501,
+                accepted: true,
+                ..
+            })
+        ));
     }
 
     #[test]
