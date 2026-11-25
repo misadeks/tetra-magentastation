@@ -80,5 +80,7 @@ An optional C ABI exposes seven independently owned protocol components.
 ## License and acknowledgments
 
 [Apache-2.0](LICENSE); see [NOTICE](NOTICE) for provenance and license details.
-Thanks to the BlueStation contributors, Harald Welte and the Osmocom community,
-Tatu Peltola, and Stichting NLnet / RETETRA3 for their upstream work and support.
+Thanks to [tetra-bluestation](https://github.com/MidnightBlueLabs/tetra-bluestation)
+and [all of its contributors](https://github.com/MidnightBlueLabs/tetra-bluestation/graphs/contributors)
+for the work this project builds on. Thanks also to Harald Welte and the Osmocom
+community, Tatu Peltola, and Stichting NLnet / RETETRA3 for their work and support.
