@@ -1,18 +1,12 @@
 # TETRA MagentaStation - Mobile Station (MS) configuration
-# Camps on / connects to a BS found by scanning the programmed frequency lists.
-#
-# Radio-style programming: an MS is programmed by DOWNLINK. It does NOT hard-code
-# a serving carrier or duplex spacing. Instead it scans the [[frequency_list]]
-# carriers, selects the best suitable cell, and adopts that cell's RF / uplink /
-# duplex / identity from its own D-MLE-SYNC/SYSINFO at camp time (EN 300 392-2
-# cl. 18.4.2). So there is no tx_freq/rx_freq and NO [cell_info] section here:
-#   - initial RX (downlink) center = first [[frequency_list]] scan candidate
-#   - uplink (TX), colour code, location area = learned over the air once camped
+# Scans downlink candidates in programmed order and camps on a suitable cell.
+# Uplink frequency, colour code and location area come from received cell data.
+# See docs/MS_CONFIG.md for settings and current codeplug-hint limitations.
 #
 # File layout:
 #   1. Global      - config_version, stack_mode
 #   2. [phy_io]    - SDR back end
-#   3. [net_info]  - home network (MCC/MNC) — shared identity, see note below
+#   3. [net_info]  - home network (MCC/MNC)
 #   4. [duplex_table]
 #   5. [ms]        - this radio's identity/affiliation (required for MS)
 #   6. CODEPLUG    - all Plane B programming grouped together:
@@ -59,8 +53,7 @@ tx_antenna = "TX"
 rx_gain_lna = 48.0
 rx_gain_pga = 8.0
 
-# TX gains. Raise only once you know your MS RF chain (PA MAX 21 on the mixer if
-# using the IT PA).
+# TX gains for the SX driver. Set these for your RF chain.
 tx_gain_dac = 0.0
 tx_gain_mixer = 0.0
 
@@ -103,15 +96,13 @@ subscriber_class = 1
 attach_groups = []
 
 ###############################################################################
-# 6. CODEPLUG (Plane B, non-standard management structure). Data only: read by
-# the management/TNMM UI and the scan/camp engine. All values map to real
-# air-interface elements and are validated against their ETSI ranges.
+# 6. CODEPLUG: groups, contacts, networks and scan candidates.
 #
 # Radio model: the MS is programmed with codeplug-wide SETTINGS, a list of
 # allowed NETWORKS, downlink FREQUENCIES to SCAN (+ optional per-carrier
 # overrides), a set of user-selectable TALKGROUPS organized into FOLDERS, plus a
 # phone book (GATEWAYS + CONTACTS). The radio scans the frequencies, camps on the
-# best suitable cell whose network is allowed, and derives RF/uplink over the air.
+# suitable cell whose network is allowed, and derives the uplink over the air.
 #
 # Everything from here to the end of the file is the codeplug.
 ###############################################################################
@@ -129,8 +120,8 @@ pid = 130
 
 # --- 6.2 Allowed networks ----------------------------------------------------
 # A cell is only suitable if its MCC/MNC is listed here (or equals the home
-# network in [net_info], which is always allowed). `priority` picks the preferred
-# network first (ascending).
+# network in [net_info], which is always allowed). `priority` is stored for
+# application ordering; the radio does not rank eligible networks by it.
 [[network]]
 mcc = 901
 mnc = 9999
@@ -139,7 +130,7 @@ priority = 0
 
 # --- 6.3 Frequency lists (downlink carriers to scan) -------------------------
 # Define one or more named lists; the radio scans ALL lists combined into a
-# single candidate set (duplicates removed) and camps on the best suitable cell.
+# single candidate set (duplicates removed), in programmed order.
 #   mode = "List"  -> scan the explicitly listed frequencies
 #   mode = "Range" -> enumerate a carrier range (see [frequency_list.range] below)
 # With no [[frequency_list]] programmed, the MS does not scan.
@@ -148,6 +139,8 @@ name = "primary"
 mode = "List"
 frequencies = [439825000, 439850000]
 dwell_ms = 800
+# Stored dwell hint; the desktop PHY currently uses its scan-dwell heartbeat,
+# not a separate timer for this value.
 
 # Range-based list example (uncomment to add to the scan set). The range is a
 # single-bracket sub-table (one range per list), NOT a [[...]] array of tables.
@@ -165,11 +158,10 @@ dwell_ms = 800
 # offsets = [0, 6250, 12500]
 
 # --- 6.4 Carrier overrides (OPTIONAL) ----------------------------------------
-# Pin extra camp parameters to one specific downlink frequency, applied when the
-# scanner lands on it. Program by explicit band+carrier (+optional freq_offset)
-# OR by absolute dl_freq (Hz). `colour_code` restricts camping to a cell with
-# that colour code; `rx_only` suppresses uplink; `custom_duplex_spacing`/
-# `duplex_index` override the derived duplex spacing.
+# Stored per-carrier hints, not consumed by current radio selection.
+# In particular, rx_only is NOT an enforced TX inhibit, colour_code does not
+# lock camping, and these duplex hints do not override received SYSINFO.
+# Use [duplex_table] for the implemented duplex-spacing override.
 [[carrier_override]]
 name = "BS-1"
 band = 4

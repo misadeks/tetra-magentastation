@@ -1,9 +1,9 @@
 # MagentaStation MS external interface
 
-The existing application schema is **`bluestation-ms-interface-6`**, discovered
+The application schema is **`bluestation-ms-interface-6`**, discovered
 through `Management::GetInterfaceVersion`. The transport subprotocols remain
 `bluestation-control-v1` and `bluestation-telemetry-v1` for compatibility.
-Renaming the executable does not rename wire contracts.
+These strings identify the wire contract independently of the executable name.
 
 ## Connection direction and encoding
 
@@ -15,13 +15,15 @@ bitcode codecs for library users; the executable's workers use JSON.
 
 Enum JSON is externally tagged: `{"Variant": {...}}`. Plane B requests/responses
 have a `Management` wrapper. Transport Ping/Pong handles heartbeats separately
-from application commands. TLS and HTTP Basic authentication are configurable;
-never expose an unauthenticated control endpoint to an untrusted network.
+from application commands. TLS and HTTP Basic authentication are configurable.
 
-## Runnable read-only example
+The [Slint MMI](https://github.com/misadeks/tetra-bluestation-mmi) implements the
+application side, including audio and PTT. See the [setup guide](../../docs/MS_GETTING_STARTED.md)
+to build it, populate its codec tables and connect the two processes.
 
-The historical filename `reference-client.py` now hosts the application side,
-matching the actual connection direction:
+## Read-only reference server
+
+`reference-client.py` listens on the application side despite its filename:
 
 ```sh
 python -m pip install "websockets>=14"
@@ -55,7 +57,7 @@ The authoritative payload definitions are
 | `GetState` | `{handle}` | `State {handle, state}` |
 | `GetConfig` | `{handle}` | `Config {handle, toml}` with redacted secrets |
 | `SetConfig` | `{handle, toml}` | Validates and persists; `Ack` |
-| `ApplyConfig` | `{handle}` | Deregistration drain, then exit 75 for supervisor restart |
+| `ApplyConfig` | `{handle}` | If a structural edit is pending: detach drain and exit 75 for supervisor restart; otherwise an acknowledgement without restart |
 | `ActivateScanlist` | `{handle, name, active}` | Reconciles desired group affiliation |
 | `SetCellSelectionMode` | `{handle, manual}` | Automatic/manual selection; rejects unsafe call-time changes |
 | `StartCellScan`, `StopCellScan` | `{handle}` | Receive-only carrier survey; emits results/completion |
@@ -84,7 +86,12 @@ exit 75. Examples are
 [`magentastation-supervisor.sh`](../../example_config/magentastation-supervisor.sh).
 `GetConfig` replaces endpoint passwords with `"********"`; posting an unchanged
 sentinel preserves the corresponding active secret. Disk TOML still stores the
-real password: protect its permissions.
+real password. The radio must have write access to its startup TOML; write-back
+normalizes formatting/comments. See [persistence](../../docs/MS_GETTING_STARTED.md#provisioning-and-persistence).
+
+These management calls work without synchronization. Other commands wait for
+real protocol ticks, so the offline backend is useful for provisioning but
+not for testing registration, floor grants or voice.
 
 ## Plane A: TNMM / TNCC / TNSDS
 
@@ -110,6 +117,18 @@ Exact payload types:
 [TNSDS](../../crates/tetra-saps/src/tnsds/mod.rs).
 Use these definitions rather than guessing omitted optional fields.
 
+For example, after registration an application can switch to one talkgroup:
+
+```json
+{"TnmmAttachDetachGroupIdentity":{"handle":31,"request":{"group_identity_attach_detach_mode":"DetachTheCurrentlyActiveGroupIdentities","group_identity_request":[{"gtsi":101,"group_identity_attach_detach_type_identifier":"Attachment","class_of_usage":"ClassOfUsage1","group_identity_detachment_request":null}],"group_identity_report":null}}}
+```
+
+The control reply is `TnmmAck`; the result arrives as
+`TnmmAttachDetachGroupIdentityConfirm` on telemetry. A bare GSSI is accepted
+in the low 24 bits of `gtsi`; a full GTSI also contains the network identity.
+`Amendment` changes only the listed identities, whereas
+`DetachTheCurrentlyActiveGroupIdentities` replaces the affiliation set.
+
 ## Speech and survey streams
 
 `MsSpeechFrame` emits decoded downlink type-1 bits:
@@ -120,9 +139,15 @@ byte**, not packed PCM. The application owns the vocoder and bad-frame concealme
 uplink bits; the stack gates them by call/floor state. It is fire-and-forget,
 not a per-frame acknowledged control procedure.
 
+To transmit, send a TNCC setup or floor request, wait for the corresponding
+grant, and send speech only for that call while its transmit permission is
+active. Release the floor on PTT-up. A transport acceptance acknowledgement
+is not a floor grant. The radio handles timing and burst scheduling; the
+application handles 8 kHz PCM capture, 60 ms codec blocks and playback.
+
 `MsScanResult` carries carrier, MCC/MNC, optional LA/colour/RSSI/registration
 requirement and late-entry support. `MsScanComplete {found, scanned}` terminates
 a survey. Radio access and decoded measurements require an actual PHY.
 
 Legacy external enum slots remain codec-compatible even where the MS does not
-implement their old use. No BS or Brew runtime is provided.
+implement their old use. See [capabilities and limits](../../docs/MS_MODE.md#capabilities-and-limits).

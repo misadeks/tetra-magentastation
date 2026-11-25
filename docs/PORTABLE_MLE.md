@@ -78,10 +78,10 @@ queued actions unchanged, including dwell/monitor counters.
 
 Malformed/truncated discriminators and broadcast PDUs return explicit errors.
 Existing unsupported internal MLE PDUs and management traffic return
-`UnsupportedMlePdu` / `UnsupportedManagement` without forwarding. No restoration,
-handover, network-broadcast interpretation, or management protocol is newly
-implemented by this extraction. Previously unimplemented TLMC/TLPD input
-primitives remain desktop stubs. The desktop adapter logs rejected events and
+`UnsupportedMlePdu` / `UnsupportedManagement` without forwarding. Restoration,
+handover, network-broadcast interpretation and those management protocols are
+not implemented. TLMC/TLPD input primitives remain desktop stubs.
+The desktop adapter logs rejected events and
 marks rejected uplink reporters discarded.
 
 ### Remaining desktop ownership
@@ -92,17 +92,13 @@ There is no serving-cell, selection, survey, service-state, timer/counter,
 discriminator encoding or protocol-dispatch decision retained in the adapter.
 The previously unsupported TLMC/TLPD input stubs remain there; unsupported
 internal MLE/management PDUs are explicitly rejected in the portable core.
-This extracts implemented behavior, not all unimplemented ETSI procedures.
 
 ## Focused validation
 
-Before moving ownership, the original desktop implementation passed 31 MLE
-tests, including newly added activation/cancellation/unsupported-route
-characterization. The preserved tests now observe the portable core.
-Three additional adapter regressions cover both downlink services' SAP metadata
-and cursor shape, MM priority/reporter handling, and CMCE channel-allocation
-correlation. Twelve portable tests cover selection/survey/service behavior,
-bit-exact routing, truncation, 4096-bit reassembly and atomic capacity failures.
+Portable tests cover selection/survey/service behavior, bit-exact routing,
+truncation, 4096-bit reassembly and atomic capacity failures. Adapter tests
+cover SAP metadata/cursor shape, priority/reporter handling and channel-allocation
+correlation.
 
 ```text
 cargo test -p tetra-ms-core --test mle --no-default-features

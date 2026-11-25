@@ -8,20 +8,12 @@
 # exits otherwise (e.g. 0 for a clean Ctrl+C shutdown, non-zero/non-75 for a
 # genuine failure).
 #
-# Real-time scheduling & CPU pinning (IMPORTANT on a shared host)
-# ---------------------------------------------------------------
-# The MS is receive-timed: if the SDR RX pipeline is starved of CPU (e.g. a UI or
-# desktop/display compositor running on the same board), samples are dropped
-# ("Lost N samples, skipping ..."), the demodulator loses sync, and the MLE
-# declares a serving-cell downlink failure (MLE-BREAK) — the radio flaps in and
-# out of service and never registers. To prevent that, this wrapper launches the
-# stack under the real-time FIFO scheduler (via `chrt`) and, if configured, pins
-# it to dedicated CPUs (via `taskset`). Both are best-effort: if the tool is
-# missing or the privilege is denied, it falls back to a normal launch.
+# Uses chrt/taskset when installed to control scheduling and CPU affinity.
+# Scheduling or privilege failures are reported by the launch command.
 #
 # Environment knobs (all optional):
 #   MAGENTASTATION_BIN   path to magentastation (default /usr/local/bin/magentastation)
-#   RT_PRIO           real-time FIFO priority, 1..99 (default 73; empty disables)
+#   RT_PRIO           real-time FIFO priority, 1..99 (default 73)
 #   CPU_AFFINITY      CPU list for taskset, e.g. "2,3" (default empty = no pin)
 #
 # Usage: magentastation-supervisor.sh /path/to/config-ms.toml

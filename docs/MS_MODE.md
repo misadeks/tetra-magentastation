@@ -1,102 +1,82 @@
-# MagentaStation MS architecture and scope
+# MS architecture and limitations
 
-MagentaStation contains the mobile-station side of the original
-[BlueStation](https://github.com/MidnightBlueLabs/tetra-bluestation) project.
-The desktop binary is `magentastation`; `stack_mode = "Ms"` is the only accepted
-role. `"Bs"` and `"Mon"` are explicitly unsupported, not alternative routes to
-a base-station implementation.
+MagentaStation implements the mobile-station side of TETRA V+D.
+[BlueStation](https://github.com/MidnightBlueLabs/tetra-bluestation) is its
+original project and base-station counterpart. The implementation references
+ETSI TS 100 392-2 V3.10.1 (2023-03).
 
-The specification referenced by the retained implementation is ETSI TS 100 392-2
-V3.10.1 (2023-03), TETRA V+D Part 2: Air Interface. Supported behavior is
-preserved, not a claim of complete conformance.
-
-## Protocol ownership
+## Components
 
 ```text
-External application (operator UI, ACELP vocoder, storage policy)
-    | control / telemetry / speech: WebSocket binary JSON
+Slint MMI or another application (UI, microphone/speaker, ACELP)
+    | control / telemetry / speech: binary WebSocket JSON
 Desktop adapters (tetra-entities, tetra-config)
-    | translated events and polled actions
+    | events and actions
 tetra-ms-core (LLC, MAC/RA/reassembly, MM, MLE, CMCE, SDS)
     |
 tetra-ms-types (TDMA, identities, packed bits, frequencies)
 
-Desktop PHY/LMAC -> tetra-phy-core (pure logical-channel coding)
+Desktop PHY/LMAC -> tetra-phy-core (logical-channel coding)
     |
 SoapySDR: receive downlink, transmit granted uplink bursts
 ```
 
-There is one authoritative supported MS protocol implementation per layer.
-Desktop SAP/BitBuffer conversion, logging, receipt sidecars, audio FIFOs,
-codeplug enumeration, persistence, threads and drivers remain outside the
-allocator-free cores. The optional C ABI exposes seven separately owned
-components rather than a second stack.
+The protocol state machines live in the allocator-free core. Desktop adapters
+translate SAPs/buffers, track receipts, queue speech, log events, and handle
+configuration, threads and drivers. The optional C ABI exposes independently
+owned protocol components; it is not another implementation of the stack.
 
-`MessageRouter` is receive-timed: only recovered downlink slots drive protocol
-ticks. No BS free-running clock or runtime remains. During loss of synchronization,
-offline-safe management continues to run, but protocol commands requiring time
-remain deferred. The explicit `None` backend opens no radio, sleeps between
-management polls, and generates no synthetic TDMA time.
+`MessageRouter` takes its protocol clock from recovered downlink slots.
+While unsynchronized it can service configuration/state management, but does
+not invent TDMA ticks. `backend = "None"` is an offline management backend,
+not a radio simulator.
 
 The SDR receives the serving-cell downlink and transmits discontinuous uplink
-bursts. The uplink carrier is derived from received SYSINFO; `PhyMs` refuses
-transmission before the TX retune. The existing recovered-time, reserved-slot,
-stealing and receipt semantics are unchanged. No hardware was accessed while
-creating this repository.
+bursts. The uplink carrier comes from SYSINFO; PHY rejects bursts before the
+TX retune. Speech coding runs in the external application, not the radio.
 
-## Retained procedures and boundaries
+## Capabilities and limits
 
-| Area | Included | Limits |
+| Area | Implemented | Not implemented / limits |
 | --- | --- | --- |
-| PHY/LMAC | Downlink synchronization and demodulation; NUB/CUB uplink; control and TCH/S coding; STCH stealing | Hardware/sample transport stays platform-owned; other modulation modes unsupported |
-| MAC | AACH/SYSINFO/RESOURCE/FRAG/END receive, own/group/broadcast filtering, random/reserved access, uplink fragmentation | Bounded queues; encrypted fragments and extended allocation procedures remain unsupported |
-| LLC | Basic-link sequencing, early/piggyback/automatic ACKs, FCS and retries | Existing duplicate-delivery and outbound-FCS semantics retained |
-| MLE | Network/class suitability, initial selection, scanning, manual survey/camp, BREAK/REOPEN and routing | Full neighbor reselection, handover and restoration procedures not added |
-| MM | ITSI attach, rejection/retry timers, group affiliation, deregistration, supported location updates | Alias adoption, authentication/OTAR, energy economy and unsupported management procedures not added |
-| CMCE | Group, individual and duplex call control; floor control; restoration paths; DTMF; concurrent-call arbitration | Full supplementary services and unsupported ETSI procedures remain deferred |
-| SDS | User data/status, SDS-TL transfer/report/ACK tracking, delivery/read reports and cancellation | Concatenation not implemented |
-| Speech | Downlink decoded bits/BFI to application; uplink speech bits gated by call/floor state | No in-stack ACELP codec |
-| Desktop interfaces | TNMM/TNCC/TNSDS control, telemetry, runtime state, codeplug, persistent config, supervised restart | Non-standard management plane; not an ETSI PEI implementation |
+| PHY/LMAC | Downlink sync/demodulation, NUB/CUB uplink, control/TCH/S coding and STCH stealing | Other modulation modes; sample transport remains driver-dependent |
+| MAC | AACH/SYSINFO/RESOURCE/FRAG/END receive, identity filtering, random/reserved access and fragmentation | Encrypted fragments, extended allocation procedures; bounded queues |
+| LLC | Basic-link sequencing, early/piggyback/automatic ACKs, FCS and retries | Duplicate downlink delivery is retained; an outbound FCS flag does not append an FCS |
+| MLE | Initial selection, ordered scanning, manual survey/camp, network/class suitability, BREAK/REOPEN and routing | Full neighbor reselection/handover; no strongest-cell ranking |
+| MM | ITSI attach, retry/reject handling, group affiliation, detach and supported location updates | Alias adoption, authentication/OTAR, energy economy and enable/disable |
+| CMCE | Group, individual and duplex calls, floor control, restoration paths, DTMF and concurrent-call arbitration | Full supplementary services |
+| SDS | Data/status, SDS-TL transfer/report/ACK tracking, delivery/read reports and cancellation | Concatenated messages |
+| Speech | Decoded downlink bits/BFI and grant-gated uplink bits | No in-stack ACELP codec or audio device |
+| Interfaces | TNMM/TNCC/TNSDS, state, codeplug/config persistence and supervised restart | Management is application-defined, not standardized PEI |
 
-Authentication, air-interface encryption, enable/disable, DMO and SNDCP packet
-data remain unsupported. No cryptography or TEA1 behavior was redesigned.
+There is no BS or monitor runtime, DMO, air-interface encryption or SNDCP
+packet-data service. Carrier override hints (including `rx_only`) are stored
+but not enforced by the radio; see the [configuration reference](MS_CONFIG.md#carrier-overrides).
+Schema entries for dormant procedures do not imply those procedures work.
 
-The source snapshot included reports of RF success in its original environment.
-Those are historical upstream reports, **not validation of this derivative**.
-The current repository's evidence is software regression, compilation and
-offline loopback integration; live RF timing, sample scheduling, RF power,
-driver behavior and embedded stack watermarks require separate validation.
+Software regression and cross-compilation do not establish live RF
+interoperability. Driver/sample timing, RF performance and embedded stack
+watermarks must be measured on the target setup.
 
 ## Source map
+
+Desktop paths below are relative to `crates/tetra-entities/src`; portable paths
+are relative to `crates`:
 
 | Layer | Desktop adapter | Portable implementation |
 | --- | --- | --- |
 | LLC | `llc/llc_ms.rs`, `llc/ms_adapter.rs` | `tetra-ms-core/src/llc.rs` |
-| MAC | `umac/umac_ms.rs`, `umac/subcomp/ms_*.rs` | `mac/`, `random_access.rs`, `reassembly.rs` |
-| MLE | `mle/mle_ms.rs` | `mle.rs` |
-| MM | `mm/mm_ms.rs` | `mm.rs` |
-| CMCE | `cmce/cmce_ms.rs`, `cmce/subentities/cc_ms/` | `cmce.rs` |
-| SDS | `cmce/subentities/sds_ms.rs` | `sds.rs` |
+| MAC/RA | `umac/umac_ms.rs`, `umac/subcomp/ms_*.rs` | `tetra-ms-core/src/mac/`, `random_access.rs`, `reassembly.rs` |
+| MLE | `mle/mle_ms.rs` | `tetra-ms-core/src/mle.rs` |
+| MM | `mm/mm_ms.rs` | `tetra-ms-core/src/mm.rs` |
+| CMCE/SDS | `cmce/cmce_ms.rs`, `cmce/subentities/` | `tetra-ms-core/src/cmce.rs`, `sds.rs` |
 | Coding | `lmac/lmac_ms.rs`, `lmac/components/` | `tetra-phy-core/src/` |
-| PHY | `phy/phy_ms.rs`, `phy/components/` | Platform adapter, not protocol ownership |
+| PHY | `phy/phy_ms.rs`, `phy/components/` | Platform adapter |
 
-Desktop paths above are relative to `crates/tetra-entities/src`; portable paths
-without a crate name are relative to `crates/tetra-ms-core/src`.
+Shared network PDU parsers remain because receiving infrastructure messages is
+part of MS operation. Existing `bluestation-*` interface identifiers and legacy
+external enum slots are compatibility vocabulary, not BS runtime selection.
 
-## Compatibility and removals
-
-Control, telemetry, TNMM/TNCC/TNSDS, management and speech message shapes and
-their schema/subprotocol identifiers are retained. The legacy `TetraEntity::Brew`
-wire discriminant is reserved for codec compatibility, but no entity, transport
-bridge, scheduler or configuration implements that integration.
-
-Actual BS entities, channel/circuit schedulers, subscriber registry, broadcasting
-configuration, network/Brew routing, downlink transmitter and uplink receiver
-roles, BS tests/examples and release publishing workflow are absent. Shared
-network PDU parsers/encoders remain because they are MS receive vocabulary or
-wire-reference fixtures. SNDCP remains an explicit unsupported boundary rather
-than a renamed BS implementation.
-
-See [portable integration and validation](PORTABLE_MS.md),
-[configuration](MS_CONFIG.md), and the
-[external interface catalog](../examples/ms-interface/README.md).
+See [setup](MS_GETTING_STARTED.md), [configuration](MS_CONFIG.md),
+[application interface](../examples/ms-interface/README.md) and
+[portable Rust/C integration](PORTABLE_MS.md).

@@ -1,235 +1,305 @@
-# Getting Started (MS mode)
+# Setting up MagentaStation
 
-A step-by-step guide to build and run **TETRA MagentaStation**, the MS-only
-portable-radio stack. Follow
-it top to bottom and you'll have a software TETRA radio that scans, camps on a
-base station, and registers. No prior Rust experience needed.
+The radio and operator interface are separate programs:
 
-> Looking for architecture, supported capabilities, or the config
-> reference? See [`MS_MODE.md`](MS_MODE.md) and [`MS_CONFIG.md`](MS_CONFIG.md).
+| Program | Role | Configuration |
+| --- | --- | --- |
+| `magentastation` | SDR, TETRA protocol, codeplug and radio state | TOML path passed on the command line |
+| `tetra-bluestation-mmi` | Slint UI, calls/PTT, microphone/speaker and ACELP | `config.toml` in the MMI's working directory |
 
----
+The radio is a WebSocket **client**. The MMI listens for it on control port
+**9102** and telemetry port **9101**. Start the MMI first; the radio also retries
+if it starts before the MMI. [BlueStation](https://github.com/MidnightBlueLabs/tetra-bluestation)
+is the base-station counterpart, not the radio executable used here.
 
-## 0. What this is (30 seconds)
+Commands below use Linux shell syntax. The
+[MMI setup guide](https://github.com/misadeks/tetra-bluestation-mmi/blob/master/docs/GETTING_STARTED.md)
+covers its Windows build, and the [Pi guide](https://github.com/misadeks/tetra-bluestation-mmi/blob/master/PI_SETUP.md)
+covers its display, DRM/KMS, audio and service setup.
 
-`magentastation` is the **radio stack**. In MS mode it drives an SDR as a
-portable TETRA subscriber unit: it scans programmed frequencies, camps on a base
-station's downlink, derives its uplink over the air, and registers (ITSI attach).
+## Install build tools and the SDR driver
 
-It has **no screen of its own**. The operator screen — call control, contacts,
-codeplug, voice — is a separate app, the **MMI**:
+Install current stable Rust from [rustup.rs](https://rustup.rs), then check:
 
-- **[tetra-bluestation-mmi](https://github.com/misadeks/tetra-bluestation-mmi)** — the operator UI.
-
-The radio stack talks to the MMI over two local WebSocket connections. Important:
-**the stack is the client — it connects *to* the MMI.** So you normally start the
-MMI first (or just let the stack retry; it reconnects within ~1 s). You don't
-need the MMI to bring the radio up on air — it will scan/camp/register on its own
-— but you need it to make calls and see state.
-
----
-
-## 1. Install the tools
-
-RF operation normally runs on **Linux** (a Raspberry Pi is
-the typical target; a Linux PC or WSL works for building). You need **Git**,
-**Rust** (a recent stable — the stack uses Rust edition 2024, so 1.85+), and
-**SoapySDR** plus the driver module for your radio.
-
-### Linux (Ubuntu/Debian, incl. Raspberry Pi OS)
-
-```bash
-# Git + Rust + build essentials
-sudo apt update && sudo apt install -y git curl build-essential pkg-config
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # accept defaults
-source "$HOME/.cargo/env"
-
-# SoapySDR runtime + headers (the build links against these)
-sudo apt install -y libsoapysdr-dev soapysdr-tools
+```sh
+rustc --version
+cargo --version
 ```
 
-You also need the **SoapySDR driver module for your radio**. This guide assumes
-the **SXceiver (SX1255)**, exposed by SoapySX as `driver=sx` — install/build it
-per its own instructions. Verify Soapy can see your device:
+Use **Rust 1.95 or newer** when building the MMI. The radio uses Rust edition
+2024; its locked dependencies are built with current stable Rust in CI.
 
-```bash
-SoapySDRUtil --find      # your device should be listed (e.g. driver=sx)
+On Debian/Ubuntu or Raspberry Pi OS:
+
+```sh
+sudo apt update
+sudo apt install git build-essential pkg-config libsoapysdr-dev soapysdr-tools clang libclang-dev
 ```
 
-> **Windows note:** native builds need a configured SoapySDR SDK (`SOAPY_SDR_ROOT`),
-> a compatible C/C++ toolchain and the SDK DLL directory on `PATH`. The portable
-> libraries do not depend on SoapySDR. A build linked to a test stub proves
-> compilation/offline behavior only, never live radio support.
+SoapySDR itself is not a device driver. Install the matching Soapy module for
+your SDR using that driver's instructions. The supplied RF example is for an
+SXceiver through SoapySX (`driver=sx`); change the selector, sample rate, antenna
+and gain names if you use another device. Check the installed driver and device
+when preparing RF operation:
 
----
+```sh
+SoapySDRUtil --info
+SoapySDRUtil --find
+SoapySDRUtil --probe="driver=sx"
+```
 
-## 2. Get the code
+These are user-run device checks, not requirements for the offline backend.
+On Windows, native radio builds need the SoapySDR SDK (`SOAPY_SDR_ROOT`), a
+matching C/C++ toolchain, and the SDK's DLL directory on `PATH`. WSL builds use
+Linux dependencies; access to an SDR from WSL depends on the device/driver.
 
-```bash
+## Build the radio
+
+```sh
 git clone https://github.com/misadeks/tetra-magentastation.git
 cd tetra-magentastation
+cargo build --locked --release -p magentastation
+./target/release/magentastation --help
 ```
 
-There are **no git submodules** to fetch, and **no speech-codec tables to
-generate** — the ACELP voice codec lives in the MMI UI, not here.
+The binary is `target/release/magentastation` (`.exe` on Windows). This repository
+has no submodules or vocoder tables. The portable libraries can also be used
+without SoapySDR; see [portable integration](PORTABLE_MS.md).
 
----
+## Build the Slint MMI and vocoder
 
-## 3. Build
+Install the MMI's Linux UI/audio dependencies:
 
-```bash
-cargo build -p magentastation
+```sh
+sudo apt install \
+  libasound2-dev libfontconfig1-dev libxkbcommon-dev \
+  libdrm-dev libgbm-dev libinput-dev libudev-dev \
+  libegl-dev libgles-dev libgl1-mesa-dri \
+  libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libwayland-dev
 ```
 
-The first build downloads and compiles dependencies (several minutes — normal).
-For a faster, optimized binary:
+Clone it into a separate directory, for example beside `tetra-magentastation`:
 
-```bash
-cargo build --release -p magentastation   # lands in target/release/magentastation
+```sh
+cd ..
+git clone --recurse-submodules https://github.com/misadeks/tetra-bluestation-mmi.git
+cd tetra-bluestation-mmi
 ```
 
-Sanity-check your checkout with the tests (optional):
+If already cloned without submodules, run `git submodule update --init --recursive`.
+The MMI depends on the Rust [libtetra-acelp codec](https://github.com/misadeks/libtetra-acelp)
+through `third_party/libtetra-acelp`. Generate its tables locally,
+then build:
 
-```bash
-cargo test -p tetra-config      # config validation / round-trip
-cargo test -p tetra-entities    # MS stack unit + integration tests
+```sh
+cd third_party/libtetra-acelp
+cargo run -p populate
+cd ../..
+cargo build --release
 ```
 
----
+The populate tool retrieves the ETSI reference tables; they are not shipped in
+this repository. For a local archive or updated prerequisites, follow the
+[MMI codec setup](https://github.com/misadeks/tetra-bluestation-mmi/blob/master/docs/GETTING_STARTED.md#3-generate-the-speech-codec-tables-one-time).
+The vocoder belongs in the MMI, not in the radio. Keep generated codec tables in
+that checkout.
 
-## 4. Start offline, then configure RF if authorized
+## Connect the programs
 
-For interface integration without hardware:
+Keep the two `config.toml` files separate. The MMI reads its file from the
+**current working directory**, not automatically from the binary's directory.
+Run it from its checkout, or set a service's `WorkingDirectory` accordingly.
 
-```bash
-python examples/ms-interface/reference-client.py
-# In a second terminal:
-cargo run -p magentastation -- example_config/config-offline.toml
-```
-
-The reference server needs `websockets>=14` (`python -m pip install "websockets>=14"`).
-This backend opens no radio, generates no protocol ticks, and only services
-offline management. Stop it before changing to an RF configuration.
-
-The following RF configuration can transmit registration/uplink signaling.
-Use it only with explicit authorization and a suitable RF environment.
-
-Copy the commented example and edit it — it's your radio's "codeplug":
-
-```bash
-cp example_config/config-ms.toml config.toml
-```
-
-The bare minimum to get on air on your network:
-
-| Setting | What it does |
-|---|---|
-| `[phy_io.soapysdr].device` | Your SDR selector, e.g. `driver=sx`. Check with `SoapySDRUtil --find`. |
-| `[[frequency_list]].frequencies` | The **downlink** carrier(s), in Hz, the radio scans to find a cell. |
-| `[net_info]` `mcc` / `mnc` | Your **home network** identity (must match the cell you want to camp on). |
-| `[ms].issi` | This radio's own 24-bit address (`1..=16777215`). **Change it** from the default. |
-| `[ms].attach_groups` | Talkgroups (GSSIs) to attach to once registered. Empty does not disable registration or other uplink signaling. |
-
-> ⚠️ **Uplink TX gain — the defaults are low, so you may not register.** The
-> example ships `tx_gain_dac = 0.0` and `tx_gain_mixer = 0.0` — a deliberately
-> low starting point. If the base station can't hear your random-access bursts,
-> registration fails (you'll see `random access abandoned: MaxTransmissions` in
-> the log). Raise the TX gain (chiefly `tx_gain_mixer`) to suit your RF chain
-> before expecting uplink / registration — see the comments in `config-ms.toml`.
-
-Full field-by-field reference: **[`MS_CONFIG.md`](MS_CONFIG.md)**.
-
-Run it:
-
-```bash
-./target/debug/magentastation config.toml      # or target/release/... for a release build
-```
-
-A healthy start logs, in order: `downlink synchronized` → `selected serving
-cell` → (with TX gain set) a registration attempt. For a quiet journal the stack
-defaults to `RUST_LOG=info`; bump to `RUST_LOG=debug` (or `trace`) for the full
-per-PDU detail when troubleshooting.
-
----
-
-## 5. Connect the operator UI (MMI)
-
-To place/receive calls, see live state, program contacts, etc., run the
-**[tetra-bluestation-mmi](https://github.com/misadeks/tetra-bluestation-mmi)**
-app (build/run it from its own
-[Getting Started](https://github.com/misadeks/tetra-bluestation-mmi/blob/master/docs/GETTING_STARTED.md)).
-
-The MMI is the **server**; the radio stack connects to it. Tell the stack where
-the MMI is by adding `[command]` and `[telemetry]` sections to your `config.toml`
-(the MMI listens on control `9102` and telemetry `9101` by default):
+In the **MMI** configuration, these sections are listen addresses:
 
 ```toml
 [command]
-host = "127.0.0.1"   # the host running the MMI (127.0.0.1 if same machine)
+host = "127.0.0.1"
 port = 9102
+use_tls = false
 
 [telemetry]
 host = "127.0.0.1"
 port = 9101
+use_tls = false
 ```
 
-The stack attempts to connect **immediately** on start and retries every ~1 s, so
-you can start the two apps in any order — it links up within about a second of
-the MMI being available. (Auth/TLS fields exist too — see
-[`MS_CONFIG.md`](MS_CONFIG.md).)
+Edit the existing sections rather than adding duplicates. The shipped MMI file
+binds `0.0.0.0`; loopback is enough when both programs run on the same host.
+For different hosts, bind the MMI to its network interface and use that host's
+address in the radio config. Match TLS/credentials at both ends.
 
----
+Start the MMI from its directory:
 
-## 6. Deploy to a Raspberry Pi
+```sh
+./target/release/tetra-bluestation-mmi
+```
 
-For an always-on radio, run the stack under systemd. A ready-made unit and a
-supervisor wrapper are in `example_config/`:
+From the **radio** checkout, try offline management:
 
-- `example_config/magentastation.service` — systemd unit (real-time scheduling,
-  config-apply restart handling, `RUST_LOG=info`).
-- `example_config/magentastation-supervisor.sh` — a plain-shell alternative.
+```sh
+./target/release/magentastation example_config/config-offline.toml
+```
 
-```bash
-sudo cp example_config/magentastation.service /etc/systemd/system/
-# edit ExecStart (binary + config paths) and User/Group for your setup, then:
+It connects, reports its interface version and idle state, and serves
+configuration reads/writes. It does not open an SDR or create protocol ticks;
+registration, calls and voice will not progress. If you only need to inspect
+the interface, use the [Python reference server](../examples/ms-interface/README.md#read-only-reference-server)
+instead of the MMI, not on the same ports at the same time.
+
+## Configure and start RF operation
+
+Stop the offline radio and copy the RF example:
+
+```sh
+cp example_config/config-ms.toml config.toml
+```
+
+Edit these fields in the radio's file:
+
+| Setting | What to set |
+| --- | --- |
+| `[phy_io.soapysdr]` | Device selector, sample rate, antenna names, PPM and RX/TX gains for your SDR |
+| `[net_info]` | Home MCC/MNC |
+| `[ms]` | Own ISSI, subscriber class and initial group affiliations |
+| `[[frequency_list]]` | Downlink carrier frequencies in Hz |
+| `[duplex_table]` | Overrides only if your network uses nonstandard duplex spacing |
+| `[[talkgroup]]`, `[[scanlist]]` | Named groups and optional affiliation sets |
+
+Add the same `[command]` and `[telemetry]` sections shown above to the **radio**
+file; here `host` is the MMI server's address, not a listen address. The RF
+example leaves these optional endpoints out. The control key is `[command]`,
+not `[control]`.
+
+Leave `stack_mode = "Ms"`. The radio scans candidates in programmed order,
+checks network/subscriber-class suitability, camps, and derives the uplink
+from the cell's SYSINFO. Registration may transmit even with
+`attach_groups = []`; an empty affiliation list is not a receive-only switch.
+`carrier_override.rx_only` is stored codeplug data, not an enforced TX inhibit.
+See [configuration behavior](MS_CONFIG.md#carrier-overrides) before relying on
+individual codeplug hints.
+
+The SX example starts with low TX gains. Set gains for your own RF chain;
+one driver's gain values are not portable to another. Then run:
+
+```sh
+./target/release/magentastation config.toml
+```
+
+Check synchronization, serving-cell and registration messages. The MMI should
+show service and registration state. Use `RUST_LOG=debug` for more detail.
+
+## Configure voice and PTT
+
+In the **MMI** checkout, list its audio device names:
+
+```sh
+./target/release/tetra-bluestation-mmi --list-audio
+```
+
+Edit the MMI's existing `[audio]` section, then restart it:
+
+```toml
+[audio]
+enabled = true
+output_device = "default"
+input_device = "default"
+sample_rate = 8000
+frame_ms = 60
+jitter_ms = 0
+```
+
+Device selectors accept case-insensitive name substrings. `"default"` uses the
+system default. The codec uses 8 kHz speech and two 137-bit subframes per
+60 ms block. The example uses zero jitter buffering; increase `jitter_ms` if
+network delivery is bursty, at the cost of latency. Missing microphone input
+leaves receive audio available but prevents uplink speech.
+
+On a Pi sharing an SXceiver, use a separate USB audio device for MMI sound.
+The MMI's [Pi audio instructions](https://github.com/misadeks/tetra-bluestation-mmi/blob/master/PI_SETUP.md#audio-device-use-a-usb-codec-not-onboard-audio)
+describe its ALSA configuration. Do not copy card names without checking your
+device. `--test-ring` is an MMI speaker test; it is not an RF/voice-link test.
+
+Select/attach a talkgroup in the MMI and wait for registration and service.
+Hold its on-screen group PTT to request the floor/start a group call; speak
+after the grant and release PTT to release the floor. Individual simplex calls
+have their own call PTT; duplex calls use the call's transmit permission.
+There is no physical GPIO/evdev PTT binding configured by these instructions.
+
+The radio transports encoded speech bits over the existing control/telemetry
+connections. It has no `[audio]` device settings and no separate voice port.
+For application integration, see the [speech contract](../examples/ms-interface/README.md#speech-and-survey-streams).
+
+## Provisioning and persistence
+
+The MMI reads the active codeplug through `GetConfig`, edits it, and sends
+`SetConfig`. The radio writes to the same TOML path it loaded at startup.
+The service account needs write permission there. Comments/layout are replaced
+by canonical TOML on write-back; keep a copy of hand-written settings if needed.
+
+Operational codeplug edits apply live. Structural settings such as ISSI, SDR
+or endpoint changes need `ApplyConfig` and a restart. The process exits with
+code **75**; without a supervisor, run it again with the same config path.
+`ApplyConfig` does nothing when no structural change is pending.
+Endpoint passwords are redacted on reads and preserved when an unchanged
+`"********"` sentinel is posted back.
+
+The MMI's own display/audio preferences and message/call history are separate
+from the radio codeplug. Its storage directory defaults to `data` under its
+working directory (`[storage].dir` in the MMI config).
+
+## Run as a service
+
+The sample [systemd unit](../example_config/magentastation.service) handles
+exit-75 restarts. After configuring the radio:
+
+```sh
+sudo install -m 755 target/release/magentastation /usr/local/bin/magentastation
+sudo install -d /etc/magentastation
+sudo install -m 600 config.toml /etc/magentastation/config-ms.toml
+sudo install -m 644 example_config/magentastation.service /etc/systemd/system/magentastation.service
+```
+
+Edit the unit's `User`, `Group`, device access, paths and CPU affinity for your
+machine; give that account access to the config file for provisioning. The
+sample's CPUs `2 3` and FIFO priority `73` are examples, not universal settings.
+Then:
+
+```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now magentastation
 journalctl -u magentastation -f
 ```
 
-> **Running the MMI on the same Pi?** The receive-timed radio and a GUI/display
-> can fight for CPU and memory/DMA bandwidth, which starves the SDR and makes the
-> radio drop in and out of service. See the **"Real-time scheduling"** section of
-> [`MS_CONFIG.md`](MS_CONFIG.md) for the fix (RT priority, CPU pinning, keeping the
-> UI off the radio's cores, and not routing UI audio through the SDR's I2S codec).
+For a plain-shell supervisor instead:
 
----
+```sh
+MAGENTASTATION_BIN="$PWD/target/release/magentastation" \
+  sh example_config/magentastation-supervisor.sh "$PWD/config.toml"
+```
+
+It uses `chrt` if installed, so its default FIFO scheduling may require extra
+privileges. Use systemd for managed deployments. The
+[MMI Pi guide](https://github.com/misadeks/tetra-bluestation-mmi/blob/master/PI_SETUP.md)
+owns the separate UI service/display setup.
 
 ## Troubleshooting
 
-**`SoapySDRUtil --find` shows nothing / "No devices found"**
-Your SDR driver module isn't installed or the device isn't connected. The stack
-can't open the radio without it. Install the driver for your hardware (e.g.
-SoapySX for `driver=sx`).
+| Symptom | Check |
+| --- | --- |
+| `soapysdr-sys`, `pkg-config` or missing-library build errors | Install SoapySDR headers, Clang/libclang and the C/C++ toolchain. On Windows check SDK architecture, `SOAPY_SDR_ROOT` and DLL `PATH`. |
+| No SDR found | Check the Soapy driver/module installation, selector and device permissions; compare `--find`/`--probe` output. |
+| MMI codec build fails / empty submodule | Initialize submodules, then run `cargo run -p populate` in the MMI's `third_party/libtetra-acelp`. |
+| UI disconnected | Start the MMI from the correct working directory; check `[command]` 9102, `[telemetry]` 9101, host, firewall, TLS and credentials. Do not run the Python server on the same ports. |
+| UI connected, radio stays Idle | Check that the radio is not using `backend = "None"`. Offline mode does not register. |
+| Camps but registration times out | Check network/subscriber class, uplink frequency/duplex spacing, TX gains, antenna and the peer's acceptance/reject messages. A timeout alone does not identify the cause. |
+| No speech / no microphone | Check MMI audio enabled/devices/volume, codec tables, active call and floor grant. Speaker ringtone success does not prove speech reception. |
+| Repeated lost samples or `MLE-BREAK` | Check RF conditions, CPU load, driver/sample rate, power and thermal throttling. On a shared Pi, separate UI/SDR CPU and audio resources; see [scheduling](MS_CONFIG.md#scheduling-and-logging). |
+| `SetConfig` fails or changes vanish on restart | Check file permissions and that the process/service uses the file you edited. Keep MMI config and radio config distinct. |
+| Process exits 75 after Apply | Start through the supervisor/service, or restart manually with the same config. |
+| Too much logging | Use `RUST_LOG=info`; enable debug temporarily. A configured `debug_log` still writes its separate verbose file. |
 
-**Build fails in `soapysdr-sys` / `pkg-config` can't find SoapySDR**
-Install `libsoapysdr-dev` (step 1), or configure the native Windows SoapySDR SDK.
-
-**It syncs and camps but never registers; log shows `random access abandoned: MaxTransmissions`**
-The base station isn't hearing your uplink. Most often the **TX gain is too low** —
-raise `tx_gain_mixer` (step 4). Also check antenna/duplex and that the cell
-actually allows your `subscriber_class`.
-
-**Nothing happens / the UI shows no radio**
-The MMI must be running and reachable at the `[command]`/`[telemetry]` host+port
-you configured (step 5). The stack logs `Control transport connection failed …`
-once, then retries quietly every ~1 s until the MMI is up.
-
-**The radio flaps in/out of service (repeated `MLE-BREAK`) — especially with the UI on the same Pi**
-CPU/DMA starvation, not RF. See "Real-time scheduling" in
-[`MS_CONFIG.md`](MS_CONFIG.md). Confirm it's not power/thermal with
-`vcgencmd get_throttled` (`0x0` = OK).
-
-**journald: "Suppressed N messages from magentastation.service"**
-That's from an older build that logged too much. Update — the stack now defaults
-to a quiet `info` level (bump with `RUST_LOG=debug` on demand).
+See [capabilities and limitations](MS_MODE.md) for features not implemented by
+the stack. RF interoperability, driver timing and embedded memory margins need
+validation on the actual setup; the offline backend cannot establish those.
