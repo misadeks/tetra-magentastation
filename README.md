@@ -77,10 +77,17 @@ An optional C ABI exposes seven independently owned protocol components.
 - [Portable Rust/C integration and memory budgets](docs/PORTABLE_MS.md)
 - [Portable MLE component](docs/PORTABLE_MLE.md)
 
-## License and acknowledgments
+## License
 
-[Apache-2.0](LICENSE); see [NOTICE](NOTICE) for provenance and license details.
+Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for
+provenance and attribution details.
+
+## Acknowledgments
+
 Thanks to [tetra-bluestation](https://github.com/MidnightBlueLabs/tetra-bluestation)
-and [all of its contributors](https://github.com/MidnightBlueLabs/tetra-bluestation/graphs/contributors)
-for the work this project builds on. Thanks also to Harald Welte and the Osmocom
-community, Tatu Peltola, and Stichting NLnet / RETETRA3 for their work and support.
+and [all its contributors](https://github.com/MidnightBlueLabs/tetra-bluestation/graphs/contributors)
+for the foundation of MagentaStation.
+
+Thanks also to Harald Welte and the Osmocom community for their foundational
+TETRA work, Tatu Peltola for SoapySDR timestamp support and Viterbi work, and
+Stichting NLnet / RETETRA3 for supporting upstream development.
