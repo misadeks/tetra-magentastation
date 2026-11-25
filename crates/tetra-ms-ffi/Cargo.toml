@@ -1,0 +1,17 @@
+[package]
+name = "tetra-ms-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+std = ["tetra-ms-core/std"]
+c-smoke = ["std", "dep:cc"]
+standalone = []
+
+[dependencies]
+tetra-ms-core.workspace = true
+
+[build-dependencies]
+cc = { version = "1", optional = true }

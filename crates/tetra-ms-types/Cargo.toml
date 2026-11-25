@@ -1,0 +1,18 @@
+[package]
+name = "tetra-ms-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+std = []
+desktop-codecs = ["dep:serde", "dep:bitcode"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+bitcode = { workspace = true, optional = true }
+
+[[example]]
+name = "bit_access"
+required-features = ["std"]

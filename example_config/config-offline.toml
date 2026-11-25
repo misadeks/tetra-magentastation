@@ -1,0 +1,26 @@
+# Offline management only: no SDR is opened and no TDMA clock is fabricated.
+# Start the reference interface server before running this configuration.
+config_version = "0.7"
+stack_mode = "Ms"
+
+[phy_io]
+backend = "None"
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[ms]
+issi = 1000001
+subscriber_class = 1
+attach_groups = []
+
+[command]
+host = "127.0.0.1"
+port = 9102
+use_tls = false
+
+[telemetry]
+host = "127.0.0.1"
+port = 9101
+use_tls = false

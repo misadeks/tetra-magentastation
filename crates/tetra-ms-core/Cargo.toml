@@ -1,0 +1,20 @@
+[package]
+name = "tetra-ms-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+std = ["tetra-ms-types/std"]
+
+[dependencies]
+tetra-ms-types.workspace = true
+
+[[example]]
+name = "desktop"
+required-features = ["std"]
+
+[[example]]
+name = "embedded"
+crate-type = ["rlib"]

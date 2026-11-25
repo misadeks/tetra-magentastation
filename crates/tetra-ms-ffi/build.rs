@@ -1,0 +1,29 @@
+fn main() {
+    println!("cargo:rerun-if-changed=include/tetra_ms.h");
+    println!("cargo:rerun-if-changed=tests/smoke.c");
+    println!("cargo:rerun-if-changed=include/tetra_reassembly.h");
+    println!("cargo:rerun-if-changed=tests/reassembly_smoke.c");
+    println!("cargo:rerun-if-changed=include/tetra_mle.h");
+    println!("cargo:rerun-if-changed=tests/mle_smoke.c");
+    println!("cargo:rerun-if-changed=include/tetra_mm.h");
+    println!("cargo:rerun-if-changed=tests/mm_smoke.c");
+    println!("cargo:rerun-if-changed=include/tetra_mac.h");
+    println!("cargo:rerun-if-changed=tests/mac_smoke.c");
+    println!("cargo:rerun-if-changed=include/tetra_cmce.h");
+    println!("cargo:rerun-if-changed=tests/cmce_smoke.c");
+    println!("cargo:rerun-if-changed=include/tetra_sds.h");
+    println!("cargo:rerun-if-changed=tests/sds_smoke.c");
+    #[cfg(feature = "c-smoke")]
+    cc::Build::new()
+        .std("c11")
+        .file("tests/smoke.c")
+        .file("tests/reassembly_smoke.c")
+        .file("tests/mle_smoke.c")
+        .file("tests/mm_smoke.c")
+        .file("tests/mac_smoke.c")
+        .file("tests/cmce_smoke.c")
+        .file("tests/sds_smoke.c")
+        .include("include")
+        .warnings_into_errors(true)
+        .compile("tetra_ms_c_smoke");
+}

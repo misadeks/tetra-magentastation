@@ -1,0 +1,34 @@
+TETRA MagentaStation
+
+Derived from TETRA BlueStation by Wouter Bokslag / Midnight Blue and its
+contributors: https://github.com/MidnightBlueLabs/tetra-bluestation
+MS extraction source: https://github.com/misadeks/tetra-bluestation
+Source base revision: 69a3533, plus the supplied portable-MS extraction snapshot.
+
+The supplied root LICENSE contains the Apache License, Version 2.0. It is
+retained verbatim. The supplied workspace Cargo metadata instead declared MIT;
+no separate MIT license text or dual-license grant was present in the supplied
+snapshot. MagentaStation metadata follows the shipped Apache-2.0 root license
+and does not assert a new MIT or dual-license grant. This records the inherited
+discrepancy rather than relicensing third-party work. Dependencies remain under
+their respective licenses.
+
+Modifications for this derivative:
+- Separate portable MS types/protocol/coding libraries and optional C ABI.
+- Retain MS desktop control, telemetry, provisioning, persistence, speech,
+  SDR and explicit offline-management interfaces.
+- Remove BS entities, scheduling, subscriber/backhaul/Brew integration, BS
+  runtime selection/configuration and BS-only tests/examples.
+- Rename the desktop application and revise documentation/CI for MS-only use.
+- Retain existing external schema identifiers and upstream wire vocabulary.
+
+Retained upstream acknowledgments:
+- Harald Welte and the Osmocom community for the foundational osmocom-tetra work.
+- Tatu Peltola for Rust SoapySDR timestamp support and Viterbi encoder/decoder work.
+- BlueStation contributors.
+- Stichting NLnet, which allocated part of its RETETRA3 grant to the upstream
+  FOSS TETRA implementation: https://nlnet.nl/project/RETETRA3/
+
+No separate upstream NOTICE file was present in the supplied snapshot.
+Existing in-source attribution is retained. These acknowledgments do not
+replace the licenses of separately distributed dependencies or other projects.

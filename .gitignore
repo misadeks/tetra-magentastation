@@ -1,0 +1,6 @@
+.vscode
+.idea
+/target
+/config.toml
+*.elf
+__pycache__/
