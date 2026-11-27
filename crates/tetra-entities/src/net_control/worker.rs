@@ -1,10 +1,10 @@
 //! Command worker thread — receives commands from a remote server via a
 //! pluggable network transport, dispatches them to the appropriate entity
 //! through per-entity [`CommandDispatcher`] links, collects
-//! [`CommandResponse`]s, and sends them back over the network.
+//! [`ControlResponse`]s, and sends them back over the network.
 //!
-//! - decodes inbound messages as [`Command`]s, interprets how command must be handled, dispatches via per-entity links
-//! - collects [`CommandResponse`]s from entities and sends them back
+//! - decodes inbound messages as [`ControlCommand`]s and dispatches via per-entity links
+//! - collects [`ControlResponse`]s from entities and sends them back
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use crate::{
         codec::ControlCodecJson,
         commands::{ControlCommand, ControlResponse},
     },
-    network::transports::NetworkTransport,
+    network::transports::{NetworkError, NetworkTransport},
 };
 
 /// How long to block on transport receive before running a maintenance cycle.
@@ -38,6 +38,7 @@ pub struct ControlWorker<T: NetworkTransport> {
     /// warn once on a disconnect but retry quietly (DEBUG) every second after,
     /// so a UI that is simply not up yet does not flood the journal.
     down_logged: bool,
+    delivery_failed: bool,
 }
 
 impl<T: NetworkTransport> ControlWorker<T> {
@@ -48,17 +49,21 @@ impl<T: NetworkTransport> ControlWorker<T> {
             connected: false,
             last_connect_attempt: None,
             down_logged: false,
+            delivery_failed: false,
         }
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Result<(), NetworkError> {
         tracing::debug!("Control worker started");
         self.try_connect();
 
         loop {
+            self.collect_responses();
+            if self.dispatchers.values().all(CommandDispatcher::is_closed) {
+                break;
+            }
             if self.connected {
                 self.poll_commands();
-                self.collect_responses();
             } else {
                 // Not connected — sleep briefly to avoid busy-spinning
                 std::thread::sleep(POLL_TIMEOUT);
@@ -80,6 +85,14 @@ impl<T: NetworkTransport> ControlWorker<T> {
                     self.try_connect();
                 }
             }
+        }
+        self.transport.disconnect();
+        if self.delivery_failed {
+            Err(NetworkError::SendFailed(
+                "one or more control responses were not delivered".to_string(),
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -108,15 +121,23 @@ impl<T: NetworkTransport> ControlWorker<T> {
 
     /// Route a command to the correct entity's dispatcher.
     /// Override this mapping as real command variants are added.
-    fn dispatch_command(&self, command: ControlCommand) {
+    fn dispatch_command(&mut self, command: ControlCommand) {
         let target = Self::route_control_command(&command);
         match self.dispatchers.get(&target) {
             Some(dispatcher) => {
                 tracing::debug!("dispatching command to {:?}", target);
-                dispatcher.send(command);
+                if let Err(error) = dispatcher.try_send(command) {
+                    tracing::warn!("Control request rejected: entity queue full or closed");
+                    if let Some(response) = error.into_inner().rejection("entity command queue full or closed") {
+                        self.send_response(&response);
+                    }
+                }
             }
             None => {
-                tracing::warn!("no dispatcher registered for {:?}, dropping command", target);
+                tracing::warn!("no dispatcher registered for {:?}, rejecting command", target);
+                if let Some(response) = command.rejection("entity is not available") {
+                    self.send_response(&response);
+                }
             }
         }
     }
@@ -168,6 +189,8 @@ impl<T: NetworkTransport> ControlWorker<T> {
 
     fn send_response(&mut self, response: &ControlResponse) {
         if !self.connected {
+            tracing::error!("Control response delivery failed: transport disconnected");
+            self.delivery_failed = true;
             return;
         }
 
@@ -176,12 +199,11 @@ impl<T: NetworkTransport> ControlWorker<T> {
         if let Err(e) = self.transport.send_reliable(&payload) {
             tracing::warn!("Control transport send failed: {}, will reconnect", e);
             self.connected = false;
-            self.try_connect();
+            self.delivery_failed = true;
         }
     }
 
     fn try_connect(&mut self) {
-        self.last_connect_attempt = Some(Instant::now());
         match self.transport.connect() {
             Ok(()) => {
                 tracing::info!("Control transport connected");
@@ -204,6 +226,7 @@ impl<T: NetworkTransport> ControlWorker<T> {
                 self.connected = false;
             }
         }
+        self.last_connect_attempt = Some(Instant::now());
     }
 }
 
@@ -330,6 +353,108 @@ mod tests {
         use crate::management::ManagementCommand;
         let cmd = ControlCommand::Management(ManagementCommand::GetState { handle: 9 });
         assert_eq!(ControlWorker::<MockTransport>::route_control_command(&cmd), TetraEntity::Mm);
+    }
+
+    #[test]
+    fn worker_flushes_final_responses_before_closed_endpoint_exit() {
+        let (dispatcher, endpoint) = make_control_link();
+        endpoint.respond(ControlResponse::TnmmAck {
+            handle: 91,
+            accepted: true,
+            detail: None,
+        });
+        let mut worker = ControlWorker::new(HashMap::from([(TetraEntity::Mm, dispatcher)]), MockTransport::new());
+        drop(endpoint);
+        worker.run().unwrap();
+        assert_eq!(worker.transport.sent_payloads().len(), 1);
+        let response = ControlCodecJson.decode_response(&worker.transport.sent_payloads()[0]).unwrap();
+        assert!(matches!(
+            response,
+            ControlResponse::TnmmAck {
+                handle: 91,
+                accepted: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn reconnect_cooldown_begins_after_failed_attempt_completes() {
+        let mut worker = ControlWorker::new(HashMap::new(), MockTransport::failing_connect(Duration::from_millis(30)));
+        let started = Instant::now();
+        worker.try_connect();
+        assert!(worker.last_connect_attempt.unwrap().duration_since(started) >= Duration::from_millis(30));
+    }
+
+    #[test]
+    fn failed_connection_reports_undelivered_final_response_and_stops() {
+        use crate::network::transports::websocket::{WebSocketTransport, WebSocketTransportConfig};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (dispatcher, endpoint) = make_control_link();
+        endpoint.respond(ControlResponse::TnmmAck {
+            handle: 92,
+            accepted: true,
+            detail: None,
+        });
+        drop(endpoint);
+        let transport = WebSocketTransport::new(WebSocketTransportConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            use_tls: false,
+            custom_root_certs: None,
+            basic_auth_credentials: None,
+            digest_auth_credentials: None,
+            endpoint_path: "/".to_string(),
+            subprotocol: None,
+            user_agent: "magentastation-test".to_string(),
+            heartbeat_interval: Duration::from_secs(10),
+            heartbeat_timeout: Duration::from_secs(30),
+        });
+        let mut worker = ControlWorker::new(HashMap::from([(TetraEntity::Mm, dispatcher)]), transport);
+        let start = Instant::now();
+        assert!(worker.run().is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(12),
+            "closed endpoints must stop reconnect attempts"
+        );
+    }
+
+    #[test]
+    fn full_ingress_queue_returns_correlated_negative_admission() {
+        let (dispatcher, _endpoint) = make_control_link();
+        for handle in 0..crate::net_control::channel::CONTROL_QUEUE_CAPACITY as u32 {
+            dispatcher
+                .try_send(ControlCommand::TnmmStatus {
+                    handle,
+                    request: crate::tnmm::TnmmStatusRequest {
+                        direct_mode: None,
+                        dual_watch: None,
+                        energy_economy_mode: None,
+                    },
+                })
+                .unwrap();
+        }
+        let mut worker = ControlWorker::new(HashMap::from([(TetraEntity::Mm, dispatcher)]), MockTransport::new());
+        worker.try_connect();
+        worker.dispatch_command(ControlCommand::TnmmStatus {
+            handle: 999,
+            request: crate::tnmm::TnmmStatusRequest {
+                direct_mode: None,
+                dual_watch: None,
+                energy_economy_mode: None,
+            },
+        });
+        let response = ControlCodecJson.decode_response(&worker.transport.sent_payloads()[0]).unwrap();
+        assert!(matches!(
+            response,
+            ControlResponse::TnmmAck {
+                handle: 999,
+                accepted: false,
+                ..
+            }
+        ));
     }
 
     #[test]

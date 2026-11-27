@@ -12,6 +12,8 @@ use tetra_saps::lmm::{LmmMleActivateConf, LmmMleCampReq, LmmMleIdentitiesReq, Lm
 use tetra_saps::{SapMsg, SapMsgInner};
 
 #[cfg(test)]
+use tetra_pdus::mm::enums::location_update_accept_type::LocationUpdateAcceptType;
+#[cfg(test)]
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::reject_cause::RejectCause;
 #[cfg(test)]
@@ -26,9 +28,11 @@ use tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIden
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
 
 use tetra_ms_core::mm::GROUP_CLASS_OF_USAGE;
+
+const MAX_DEFERRED_CONTROL: usize = crate::net_control::channel::CONTROL_QUEUE_CAPACITY;
 use tetra_ms_core::mm::{
-    Action as MmAction, CellId, Config as MmConfig, Error as MmError, Event as MmEvent, GroupOperation, GroupRequest, MmCore, MmState,
-    PendingGroupOp, RegState, ServiceStatus as MmServiceStatus, TransferState,
+    Action as MmAction, CellId, Config as MmConfig, Error as MmError, Event as MmEvent, GroupAttachments, GroupOperation, GroupRequest,
+    MmCore, MmState, PendingGroupOp, RegState, ServiceStatus as MmServiceStatus, TransferState,
 };
 #[cfg(test)]
 use tetra_ms_core::mm::{DETACH_DRAIN_SLOTS, N351_MAX_SYSTEM_REJECTIONS, T351_TIMEOUT_SLOTS, T353_TIMEOUT_SLOTS};
@@ -48,6 +52,7 @@ pub struct MmMs {
     selection_mode_manual: bool,
     camp_force_register: bool,
     pending_scan_after_detach: bool,
+    last_tick: Option<TdmaTime>,
 }
 
 impl core::ops::Deref for MmMs {
@@ -75,6 +80,31 @@ struct ManagementContext {
 }
 
 impl MmMs {
+    fn advance_time(&mut self, queue: &mut MessageQueue, mut elapsed: u32, detach_transfer: TransferState) {
+        while elapsed > 0 {
+            // One retry interval fits the core's action budget even when detach
+            // and a pending group confirmation expire in the same batch.
+            let mut batch = elapsed.min(tetra_ms_core::mm::T351_TIMEOUT_SLOTS + 1);
+            loop {
+                match self.core_event(
+                    queue,
+                    MmEvent::Tick {
+                        elapsed_slots: batch,
+                        detach_transfer,
+                    },
+                ) {
+                    Ok(()) => break,
+                    Err(MmError::ActionCapacity) if batch > 1 => batch /= 2,
+                    Err(error) => {
+                        tracing::error!("MM: recovered time could not be advanced: {error:?}");
+                        return;
+                    }
+                }
+            }
+            elapsed -= batch;
+        }
+    }
+
     pub fn new(config: SharedConfig, telemetry: Option<TelemetrySink>, control: Option<ControlEndpoint>) -> Self {
         let serving_la = config.config().cell.location_area;
         // Seed the runtime attached-group set from config (cl. 16.8). Before any
@@ -83,12 +113,7 @@ impl MmMs {
         // `[ms].attach_groups` union the GSSIs of every scan list whose
         // programmed default is `active` (Plane B), so default-active scan lists
         // are affiliated at the first registration.
-        let mut attached_gssis = config
-            .config()
-            .ms
-            .as_ref()
-            .map(|ms| ms.attach_groups.iter().copied().collect::<BTreeSet<u32>>())
-            .unwrap_or_default();
+        let attached_gssis = config.config().initial_groups().expect("validated initial affiliations");
         let active_scanlists: BTreeSet<String> = config
             .config()
             .codeplug
@@ -97,9 +122,6 @@ impl MmMs {
             .filter(|s| s.active)
             .map(|s| s.name.clone())
             .collect();
-        for g in config.config().codeplug.default_active_scanlist_gssis() {
-            attached_gssis.insert(g);
-        }
         let cfg = config.config();
         let core = MmCore::new(
             MmConfig {
@@ -108,7 +130,7 @@ impl MmMs {
                 mnc: cfg.net.mnc,
                 initial_la: serving_la,
             },
-            &attached_gssis.iter().copied().collect::<Vec<_>>(),
+            attached_gssis.as_slice(),
         )
         .expect("MS MM configuration exceeds portable identity/group bounds");
         Self {
@@ -125,6 +147,7 @@ impl MmMs {
             selection_mode_manual: false,
             camp_force_register: false,
             pending_scan_after_detach: false,
+            last_tick: None,
         }
     }
 
@@ -203,7 +226,7 @@ impl MmMs {
                     MmServiceStatus::WaitingForRegistration => crate::tnmm::ServiceStatus::InServiceWaitingForRegistration,
                     MmServiceStatus::OutOfService => crate::tnmm::ServiceStatus::OutOfService,
                 }),
-                MmAction::RegistrationSuccess { attached } => self.emit_registration_success(attached.as_slice()),
+                MmAction::RegistrationSuccess { attached } => self.emit_registration_success(&attached),
                 MmAction::RegistrationFailure { cause } => {
                     self.emit_registration_failure(cause.and_then(|cause| RejectCause::try_from(u64::from(cause)).ok()))
                 }
@@ -220,9 +243,7 @@ impl MmMs {
                         }),
                     });
                 }
-                MmAction::GroupConfirm { op, attached, detached } => {
-                    self.emit_group_identity_confirm(&op, attached.as_slice(), detached.as_slice())
-                }
+                MmAction::GroupConfirm { op, attached, detached } => self.emit_group_identity_confirm(&op, &attached, detached.as_slice()),
                 MmAction::DetachReport { successful } => {
                     self.detach_reporter = None;
                     self.emit_report(if successful {
@@ -364,18 +385,21 @@ impl MmMs {
     /// application. GITI = Attachment, so the conditional lifetime + class of
     /// usage members are present; the detachment reason is absent (cl. 15.3.4).
     /// GTSI = MNI << 24 | GSSI (cl. 15.3.4 "GTSI").
-    fn attached_group_identities(&self, gssis: &[u32]) -> Vec<crate::tnmm::GroupIdentity> {
-        use crate::tnmm::{ClassOfUsage, GroupIdentity, GroupIdentityAttachDetachTypeIdentifier, GroupIdentityLifetime};
+    fn attached_group_identities(&self, groups: &GroupAttachments) -> Vec<crate::tnmm::GroupIdentity> {
+        use crate::tnmm::{GroupIdentity, GroupIdentityAttachDetachTypeIdentifier, GroupIdentityLifetime};
         let mni = self.own_mni() as u64;
-        gssis
+        groups
             .iter()
-            .map(|gssi| GroupIdentity {
-                gtsi: (mni << 24) | (*gssi as u64),
+            .map(|group| GroupIdentity {
+                gtsi: (mni << 24) | u64::from(group.gssi),
                 group_identity_attach_detach_type_identifier: GroupIdentityAttachDetachTypeIdentifier::Attachment,
-                // Attached at ITSI attach with the class of usage MM sends in the
-                // demand (cl. 16.10.6, GROUP_CLASS_OF_USAGE = 4 -> "Class of Usage 4").
-                group_identity_lifetime: Some(GroupIdentityLifetime::AttachmentNeededForNextItsiAttach),
-                class_of_usage: Some(ClassOfUsage::ClassOfUsage4),
+                group_identity_lifetime: Some(match group.lifetime {
+                    0 => GroupIdentityLifetime::PermanentAttachmentNotNeeded,
+                    1 => GroupIdentityLifetime::AttachmentNeededForNextItsiAttach,
+                    2 => GroupIdentityLifetime::AttachmentNotAllowedAfterNextItsiAttach,
+                    _ => GroupIdentityLifetime::AttachmentNeededForNextLocationUpdate,
+                }),
+                class_of_usage: Some(Self::class_of_usage_from_raw(group.class_of_usage)),
                 group_identity_detachment_reason: None,
             })
             .collect()
@@ -402,6 +426,7 @@ impl MmMs {
     /// state is intentionally left unchanged — the MS is still registered, just
     /// without a usable radio link.
     fn rx_mle_break(&mut self) {
+        self.last_tick = None;
         let mut unused = MessageQueue::new();
         let _ = self.core_event(&mut unused, MmEvent::LinkBreak);
     }
@@ -412,6 +437,7 @@ impl MmMs {
     /// re-fires the LMM-ACTIVATE confirmation, so any needed re-registration is
     /// evaluated there (cl. 18.3.4.7.1a); this only restores the service view.
     fn rx_mle_reopen(&mut self) {
+        self.last_tick = None;
         let mut unused = MessageQueue::new();
         let _ = self.core_event(&mut unused, MmEvent::LinkReopen);
     }
@@ -493,7 +519,7 @@ impl MmMs {
     ///
     /// `attached_gssis` are the GSSIs the SwMI confirmed attached in the
     /// D-LOCATION-UPDATE-ACCEPT (empty when none / group attachment failed).
-    fn emit_registration_success(&self, attached_gssis: &[u32]) {
+    fn emit_registration_success(&self, attached_gssis: &GroupAttachments) {
         use crate::net_telemetry::TelemetryEvent;
         use crate::tnmm::{
             RegistrationStatus, ServiceStatus, TnmmAttachDetachGroupIdentityIndication, TnmmRegistrationConfirm, TnmmRegistrationIndication,
@@ -894,7 +920,8 @@ impl MmMs {
         }
         let mut commands = Vec::new();
         if let Some(cep) = &self.control {
-            while let Some(cmd) = cep.try_recv() {
+            while commands.len() < crate::net_control::channel::CONTROL_QUEUE_CAPACITY {
+                let Some(cmd) = cep.try_recv() else { break };
                 commands.push(cmd);
             }
         }
@@ -920,15 +947,21 @@ impl MmMs {
     fn poll_control_offline(&mut self, queue: &mut MessageQueue) {
         let mut commands = Vec::new();
         if let Some(cep) = &self.control {
-            while let Some(cmd) = cep.try_recv() {
+            while commands.len() < crate::net_control::channel::CONTROL_QUEUE_CAPACITY {
+                let Some(cmd) = cep.try_recv() else { break };
                 commands.push(cmd);
             }
         }
         for cmd in commands {
             if Self::is_offline_serviceable(&cmd) {
                 self.handle_control_command(queue, cmd);
-            } else {
+            } else if self.deferred_control.len() < MAX_DEFERRED_CONTROL {
                 self.deferred_control.push(cmd);
+            } else {
+                tracing::warn!("MM: unsynchronized command queue full; rejecting request");
+                if let Some(response) = cmd.rejection("radio not synchronized; deferred command queue full") {
+                    self.respond(response);
+                }
             }
         }
     }
@@ -990,20 +1023,20 @@ impl MmMs {
                 // Table 15.2 NOTE: with all attached ITSIs detached the ISSI/MCC/
                 // MNC need not be present. When present, they must select this
                 // MS's own ITSI (single-ITSI stack).
-                if let Some(issi) = request.issi {
-                    if issi != self.own_issi() {
-                        tracing::warn!(
-                            "MM(MS): TNMM-DEREGISTRATION for ISSI {} != own ISSI {}; ignoring",
-                            issi,
-                            self.own_issi()
-                        );
-                        self.respond(ControlResponse::TnmmAck {
-                            handle,
-                            accepted: false,
-                            detail: Some("ISSI does not match the configured ITSI".to_string()),
-                        });
-                        return;
-                    }
+                if let Some(issi) = request.issi
+                    && issi != self.own_issi()
+                {
+                    tracing::warn!(
+                        "MM(MS): TNMM-DEREGISTRATION for ISSI {} != own ISSI {}; ignoring",
+                        issi,
+                        self.own_issi()
+                    );
+                    self.respond(ControlResponse::TnmmAck {
+                        handle,
+                        accepted: false,
+                        detail: Some("ISSI does not match the configured ITSI".to_string()),
+                    });
+                    return;
                 }
                 let acted = self.begin_deregistration(queue);
                 let detail = if acted {
@@ -1196,24 +1229,15 @@ impl MmMs {
     /// The `group_identities` list reports each acknowledged group as a GTSI
     /// (cl. 16.8.2: "using only the GTSIs since the (V)GSSIs is not known by the
     /// user application").
-    fn emit_group_identity_confirm(&self, op: &PendingGroupOp, accepted_attach: &[u32], accepted_detach: &[u32]) {
+    fn emit_group_identity_confirm(&self, op: &PendingGroupOp, accepted_attach: &GroupAttachments, accepted_detach: &[u32]) {
         use crate::net_telemetry::TelemetryEvent;
         use crate::tnmm::{
             GroupIdentity, GroupIdentityAttachDetachMode, GroupIdentityAttachDetachTypeIdentifier, GroupIdentityDetachment,
-            GroupIdentityLifetime, GroupIdentityReport, TnmmAttachDetachGroupIdentityConfirm,
+            GroupIdentityReport, TnmmAttachDetachGroupIdentityConfirm,
         };
 
         let mni = self.own_mni() as u64;
-        let mut group_identities: Vec<GroupIdentity> = Vec::new();
-        for gssi in accepted_attach {
-            group_identities.push(GroupIdentity {
-                gtsi: (mni << 24) | (*gssi as u64),
-                group_identity_attach_detach_type_identifier: GroupIdentityAttachDetachTypeIdentifier::Attachment,
-                group_identity_lifetime: Some(GroupIdentityLifetime::AttachmentNeededForNextItsiAttach),
-                class_of_usage: Some(Self::class_of_usage_from_raw(GROUP_CLASS_OF_USAGE)),
-                group_identity_detachment_reason: None,
-            });
-        }
+        let mut group_identities = self.attached_group_identities(accepted_attach);
         for gssi in accepted_detach {
             group_identities.push(GroupIdentity {
                 gtsi: (mni << 24) | (*gssi as u64),
@@ -1486,8 +1510,22 @@ impl MmMs {
             return;
         }
 
-        // Signal main to exit with the restart code once the loop unwinds, and
-        // clear the running flag to break the loop and start the drain.
+        // Queue the final response before shutdown. Main joins the worker after
+        // dropping the router, which drains all queued responses before exit.
+        let response = ControlResponse::Management(ManagementResponse::Ack {
+            handle,
+            accepted: true,
+            restart_required: self.restart_required,
+            message: "restart initiated; the stack will de-register and respawn with the staged configuration".to_string(),
+        });
+        let Some(control) = &self.control else {
+            tracing::error!("MM: ApplyConfig cannot acknowledge without a control endpoint");
+            return;
+        };
+        if control.try_respond(response).is_err() {
+            tracing::error!("MM: ApplyConfig refused: acknowledgement queue full or closed");
+            return;
+        }
         ctx.restart_requested.store(true, Ordering::SeqCst);
         ctx.is_running.store(false, Ordering::SeqCst);
 
@@ -1499,12 +1537,6 @@ impl MmMs {
             "MM(MS): ApplyConfig -> restart requested (detach initiated: {}); supervisor will respawn with new config",
             detaching
         );
-        self.respond(ControlResponse::Management(ManagementResponse::Ack {
-            handle,
-            accepted: true,
-            restart_required: self.restart_required,
-            message: "restart initiated; the stack will de-register and respawn with the staged configuration".to_string(),
-        }));
     }
 
     /// Build an [`crate::management::MsRuntimeState`] snapshot from MM's own
@@ -1567,13 +1599,17 @@ impl TetraEntityTrait for MmMs {
     /// so the external interface answers config/state requests as soon as the
     /// control link is up — regardless of registration/service state. All other
     /// commands are buffered and replayed on the first real tick. See
-    /// [`MmMs::poll_control_offline`].
+    /// `MmMs::poll_control_offline`.
     fn drive_offline_control(&mut self, queue: &mut MessageQueue) {
         self.poll_control_offline(queue);
     }
 
-    fn tick_start(&mut self, queue: &mut MessageQueue, _ts: TdmaTime) {
+    fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
         self.poll_control(queue);
+        // A first/recovered clock contributes one slot, not the unsynchronized
+        // interval. Duplicate or backwards clock corrections add no protocol time.
+        let elapsed = self.last_tick.map_or(1, |last| ts.diff(last).max(0) as u32);
+        self.last_tick = Some(ts);
         let detach_transfer = self
             .detach_reporter
             .as_ref()
@@ -1585,13 +1621,7 @@ impl TetraEntityTrait for MmMs {
                 TxState::Lost => TransferState::Lost,
             })
             .unwrap_or(TransferState::Pending);
-        let _ = self.core_event(
-            queue,
-            MmEvent::Tick {
-                elapsed_slots: 1,
-                detach_transfer,
-            },
-        );
+        self.advance_time(queue, elapsed, detach_transfer);
     }
 
     fn rx_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
@@ -1719,6 +1749,135 @@ attach_groups = []
         MmMs::new(SharedConfig::from_parts(cfg, None), None, None)
     }
 
+    #[test]
+    fn recovered_mm_time_covers_skips_rollover_duplicates_and_resynchronization() {
+        let mut mm = ms_mm();
+        let mut queue = MessageQueue::new();
+        mm.rx_activate_conf(&mut queue, &activate_conf(true));
+        while queue.pop_front().is_some() {}
+        let first = TdmaTime::from_int(-2);
+        mm.tick_start(&mut queue, first);
+        let before = mm.t351_countdown;
+        mm.tick_start(&mut queue, first.add_timeslots(7));
+        assert_eq!(mm.t351_countdown, before - 7);
+        mm.tick_start(&mut queue, first.add_timeslots(7));
+        assert_eq!(mm.t351_countdown, before - 7);
+        mm.rx_mle_break();
+        mm.rx_mle_reopen();
+        mm.tick_start(&mut queue, first.add_timeslots(1000));
+        assert_eq!(mm.t351_countdown, before - 8, "recovery bootstraps one slot, not the lost interval");
+        mm.tick_start(&mut queue, first.add_timeslots(1100));
+        assert_eq!(mm.t351_countdown, before - 108);
+    }
+
+    #[test]
+    fn long_mm_batch_preserves_all_retries_when_action_budget_requires_splitting() {
+        let mut mm = ms_mm();
+        let mut queue = MessageQueue::new();
+        mm.rx_activate_conf(&mut queue, &activate_conf(true));
+        while queue.pop_front().is_some() {}
+        mm.tick_start(&mut queue, TdmaTime::default());
+        mm.tick_start(&mut queue, TdmaTime::from_int(10_000));
+        assert_eq!(mm.attempts, tetra_ms_core::mm::MAX_REGISTRATION_ATTEMPTS);
+        let mut retries = 0;
+        while queue.pop_front().is_some() {
+            retries += 1;
+        }
+        assert_eq!(retries, 4, "every retry reached the adapter queue");
+    }
+
+    #[test]
+    fn offline_request_flood_is_bounded_rejected_and_replays_once_after_recovery() {
+        use crate::net_control::ControlResponse;
+        use crate::net_control::channel::make_control_link;
+        let mut mm = ms_mm();
+        let (dispatcher, endpoint) = make_control_link();
+        mm.control = Some(endpoint);
+        let mut queue = MessageQueue::new();
+        for handle in 0..MAX_DEFERRED_CONTROL as u32 * 3 {
+            dispatcher
+                .try_send(ControlCommand::TnmmStatus {
+                    handle,
+                    request: crate::tnmm::TnmmStatusRequest {
+                        direct_mode: None,
+                        dual_watch: None,
+                        energy_economy_mode: None,
+                    },
+                })
+                .unwrap();
+            mm.drive_offline_control(&mut queue);
+            if handle >= MAX_DEFERRED_CONTROL as u32 {
+                assert!(matches!(
+                    dispatcher.try_recv_response(),
+                    Some(ControlResponse::TnmmAck { accepted: false, .. })
+                ));
+            }
+        }
+        assert_eq!(mm.deferred_control.len(), MAX_DEFERRED_CONTROL);
+        assert!(queue.pop_front().is_none());
+        mm.tick_start(&mut queue, TdmaTime::default());
+        assert!(mm.deferred_control.is_empty());
+        assert_eq!(dispatcher.try_recv_responses().len(), MAX_DEFERRED_CONTROL);
+        mm.tick_start(&mut queue, TdmaTime::from_int(1));
+        assert!(dispatcher.try_recv_response().is_none());
+    }
+
+    #[test]
+    fn registration_and_group_confirm_report_the_shared_wire_class() {
+        for raw in 0..8 {
+            assert_eq!(MmMs::class_of_usage_to_raw(MmMs::class_of_usage_from_raw(raw)), raw);
+            for lifetime in 0..4 {
+                let (mut mm, source, _) = ms_mm_wired();
+                let mut queue = MessageQueue::new();
+                register_wired(&mut mm, &mut queue, &source);
+                mm.begin_group_amendment(&mut queue, &[10], &[], 100).unwrap();
+                deliver_dl(&mut mm, &mut queue, build_group_ack_metadata(&[10], &[], raw, lifetime));
+                let events = drain(&source);
+                let confirmation = events
+                    .iter()
+                    .find_map(|event| match event {
+                        TelemetryEvent::TnmmAttachDetachGroupIdentityConfirm(confirm) => Some(confirm),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    MmMs::class_of_usage_to_raw(confirmation.group_identities[0].class_of_usage.unwrap()),
+                    raw
+                );
+                assert_eq!(
+                    confirmation.group_identities[0].group_identity_lifetime,
+                    Some(match lifetime {
+                        0 => crate::tnmm::GroupIdentityLifetime::PermanentAttachmentNotNeeded,
+                        1 => crate::tnmm::GroupIdentityLifetime::AttachmentNeededForNextItsiAttach,
+                        2 => crate::tnmm::GroupIdentityLifetime::AttachmentNotAllowedAfterNextItsiAttach,
+                        _ => crate::tnmm::GroupIdentityLifetime::AttachmentNeededForNextLocationUpdate,
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn staged_legacy_cell_edit_survives_disk_reload_without_changing_live_state() {
+        use crate::management::ManagementCommand;
+        let (mut mm, _, dispatcher) = ms_mm_wired();
+        let path = std::env::temp_dir().join(format!("tetra-ms-cell-{}.toml", uuid::Uuid::new_v4()));
+        mm.set_management_context(path.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
+        dispatcher.send(ControlCommand::Management(ManagementCommand::SetConfig {
+            handle: 901,
+            toml: MS_TOML
+                .replace("location_area = 1", "location_area = 2")
+                .replace("colour_code = 1", "colour_code = 3"),
+        }));
+        mm.drive_offline_control(&mut MessageQueue::new());
+        let (_, accepted, restart) = last_mgmt_ack(&dispatcher);
+        assert!(accepted && restart);
+        let restored = from_toml_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!((restored.cell.location_area, restored.cell.colour_code), (2, 3));
+        assert_eq!((mm.config.config().cell.location_area, mm.config.config().cell.colour_code), (1, 1));
+    }
+
     fn ms_mm_with_groups(groups: &[u32]) -> MmMs {
         let list = groups.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
         let toml = MS_TOML.replace("attach_groups = []", &format!("attach_groups = [{list}]"));
@@ -1764,7 +1923,7 @@ attach_groups = []
 
     fn build_accept() -> BitBuffer {
         let pdu = DLocationUpdateAccept {
-            location_update_accept_type: LocationUpdateType::ItsiAttach,
+            location_update_accept_type: LocationUpdateAcceptType::ItsiAttach,
             ssi: Some(MS_ISSI as u64),
             address_extension: None,
             subscriber_class: None,
@@ -2147,8 +2306,8 @@ attach_groups = []
         drain_mle_identities(&mut q);
 
         // No further retransmission even after the retry window elapses.
-        for _ in 0..=T351_TIMEOUT_SLOTS {
-            mm.tick_start(&mut q, TdmaTime::default());
+        for slot in 0..=T351_TIMEOUT_SLOTS {
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
         assert!(q.pop_front().is_none(), "registered MS must not retransmit");
     }
@@ -2163,8 +2322,8 @@ attach_groups = []
         assert_eq!(mm.attempts, 1);
 
         // Countdown slots: no retransmit until the tick after T351 reaches zero.
-        for _ in 0..=T351_TIMEOUT_SLOTS {
-            mm.tick_start(&mut q, TdmaTime::default());
+        for slot in 0..=T351_TIMEOUT_SLOTS {
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
         let msg = q.pop_front().expect("demand retransmitted after timeout");
         assert!(matches!(msg.msg, SapMsgInner::LmmMleUnitdataReq(_)));
@@ -2313,9 +2472,9 @@ attach_groups = []
         let _ = q.pop_front();
 
         // Pending for the full drain window, then clears.
-        for _ in 0..DETACH_DRAIN_SLOTS {
+        for slot in 0..DETACH_DRAIN_SLOTS {
             assert!(mm.deregistration_pending(), "still draining");
-            mm.tick_start(&mut q, TdmaTime::default());
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
         assert!(!mm.deregistration_pending(), "drain complete");
 
@@ -2477,12 +2636,8 @@ attach_groups = []
     }
 
     /// R2 helper: build a D-LOCATION-UPDATE-ACCEPT whose accept-type field carries
-    /// the given raw value. The shared PDU types this field as `LocationUpdateType`
-    /// (Table 16.67), but on the wire it is a raw 3-bit value the MS reinterprets
-    /// through `LocationUpdateAcceptType` (Table 16.68). Passing
-    /// `LocationUpdateType::MigratingLocationUpdating` (raw 1) therefore simulates
-    /// a "Temporary registration" accept (accept-type raw 1).
-    fn build_accept_type(raw_type: LocationUpdateType) -> BitBuffer {
+    /// the accept-type enum value (Table 16.68).
+    fn build_accept_type(raw_type: LocationUpdateAcceptType) -> BitBuffer {
         let pdu = DLocationUpdateAccept {
             location_update_accept_type: raw_type,
             ssi: Some(MS_ISSI as u64),
@@ -2516,7 +2671,7 @@ attach_groups = []
         mm.rx_activate_conf(&mut q, &activate_conf(true));
         let _ = q.pop_front();
         // Raw 1 on the wire → "Temporary registration" per the accept table.
-        deliver_dl(&mut mm, &mut q, build_accept_type(LocationUpdateType::MigratingLocationUpdating));
+        deliver_dl(&mut mm, &mut q, build_accept_type(LocationUpdateAcceptType::TemporaryRegistration));
         assert_eq!(mm.reg_state, RegState::Registered);
         assert!(mm.temporary_registration, "raw-1 accept is a temporary registration");
 
@@ -2525,7 +2680,7 @@ attach_groups = []
         let mut q = MessageQueue::new();
         mm.rx_activate_conf(&mut q, &activate_conf(true));
         let _ = q.pop_front();
-        deliver_dl(&mut mm, &mut q, build_accept_type(LocationUpdateType::ItsiAttach));
+        deliver_dl(&mut mm, &mut q, build_accept_type(LocationUpdateAcceptType::ItsiAttach));
         assert!(!mm.temporary_registration, "raw-3 accept is a full registration");
     }
 
@@ -2538,7 +2693,7 @@ attach_groups = []
         let mut q = MessageQueue::new();
         mm.rx_activate_conf(&mut q, &activate_conf(true));
         let _ = q.pop_front();
-        deliver_dl(&mut mm, &mut q, build_accept_type(LocationUpdateType::MigratingLocationUpdating));
+        deliver_dl(&mut mm, &mut q, build_accept_type(LocationUpdateAcceptType::TemporaryRegistration));
         assert!(mm.temporary_registration);
         drain_mle_identities(&mut q);
         assert!(q.pop_front().is_none());
@@ -2696,7 +2851,9 @@ attach_groups = []
         use crate::tnmm::GroupIdentityAttachDetachTypeIdentifier as Giti;
         let (mm, source, _dispatcher) = ms_mm_wired();
         let gssi = 100u32;
-        mm.emit_registration_success(&[gssi]);
+        let groups =
+            GroupAttachments::from_slice(&[tetra_ms_core::mm::GroupAttachment::new(gssi, GROUP_CLASS_OF_USAGE, 3).unwrap()]).unwrap();
+        mm.emit_registration_success(&groups);
         let events = drain(&source);
 
         let group_ind = events.iter().find_map(|e| match e {
@@ -2955,14 +3112,14 @@ attach_groups = []
 
     fn last_ack(dispatcher: &crate::net_control::CommandDispatcher) -> (bool, Option<String>) {
         let resps = dispatcher.try_recv_responses();
-        let ack = resps
+
+        resps
             .into_iter()
             .find_map(|r| match r {
                 crate::net_control::ControlResponse::TnmmAck { accepted, detail, .. } => Some((accepted, detail)),
                 _ => None,
             })
-            .expect("a TnmmAck response");
-        ack
+            .expect("a TnmmAck response")
     }
 
     /// A TNMM-REGISTRATION request (Table 15.5) while idle initiates the ITSI
@@ -3052,8 +3209,8 @@ attach_groups = []
         // MS must return to Idle rather than staying stuck in Detaching (which
         // previously rejected any later registration with "de-registration in
         // progress").
-        for _ in 0..=DETACH_DRAIN_SLOTS {
-            mm.tick_start(&mut q, TdmaTime::default());
+        for slot in 1..=DETACH_DRAIN_SLOTS + 1 {
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
         assert_eq!(mm.reg_state, RegState::Idle, "MS returns to Idle after the de-registration drain");
 
@@ -3095,6 +3252,10 @@ attach_groups = []
     /// Build a D-ATTACH/DETACH GROUP IDENTITY ACKNOWLEDGEMENT (cl. 16.9.2.2) that
     /// accepts the given attached / detached GSSIs, exactly as this BS emits it.
     fn build_group_ack(attached: &[u32], detached: &[u32]) -> BitBuffer {
+        build_group_ack_metadata(attached, detached, GROUP_CLASS_OF_USAGE, 3)
+    }
+
+    fn build_group_ack_metadata(attached: &[u32], detached: &[u32], class: u8, lifetime: u8) -> BitBuffer {
         use tetra_pdus::mm::fields::group_identity_attachment::GroupIdentityAttachment;
         use tetra_pdus::mm::fields::group_identity_downlink::GroupIdentityDownlink;
 
@@ -3102,8 +3263,8 @@ attach_groups = []
         for &g in attached {
             downlink.push(GroupIdentityDownlink {
                 group_identity_attachment: Some(GroupIdentityAttachment {
-                    group_identity_attachment_lifetime: 3,
-                    class_of_usage: GROUP_CLASS_OF_USAGE,
+                    group_identity_attachment_lifetime: lifetime,
+                    class_of_usage: class,
                 }),
                 group_identity_detachment_uplink: None,
                 gssi: Some(g),
@@ -3255,8 +3416,8 @@ attach_groups = []
         let reporter = take_detach_reporter(&mut q);
         reporter.mark_transmitted(); // on air, ack withheld for the whole drain
 
-        for _ in 0..DETACH_DRAIN_SLOTS {
-            mm.tick_start(&mut q, TdmaTime::default());
+        for slot in 0..DETACH_DRAIN_SLOTS {
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
 
         assert_eq!(find_reports(&drain(&source)), vec![TransferResult::TransferSuccessfulDone]);
@@ -3275,8 +3436,8 @@ attach_groups = []
         assert!(mm.begin_deregistration(&mut q));
         let _reporter = take_detach_reporter(&mut q); // leave it Pending
 
-        for _ in 0..DETACH_DRAIN_SLOTS {
-            mm.tick_start(&mut q, TdmaTime::default());
+        for slot in 0..DETACH_DRAIN_SLOTS {
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
 
         assert_eq!(find_reports(&drain(&source)), vec![TransferResult::TransferFail]);
@@ -3570,8 +3731,8 @@ attach_groups = []
         let _ = drain(&source);
 
         // Drive enough ticks for T353 to expire.
-        for _ in 0..(T353_TIMEOUT_SLOTS + 2) {
-            mm.tick_start(&mut q, TdmaTime::default());
+        for slot in 1..(T353_TIMEOUT_SLOTS + 3) {
+            mm.tick_start(&mut q, TdmaTime::from_int(slot as i32));
         }
 
         assert!(mm.pending_group_op.is_none(), "operation cleared on T353 expiry");
@@ -4066,7 +4227,7 @@ order = 2\n"
     /// Starting a receive-only survey while registered first de-registers
     /// (U-ITSI DETACH, cl. 16.6.1) and DEFERS the survey until that detach drains
     /// - the survey tunes away from the serving cell, so the detach must reach
-    /// the air first. Once the drain completes the deferred survey is launched.
+    ///   the air first. Once the drain completes the deferred survey is launched.
     #[test]
     fn test_scan_while_registered_deregisters_then_starts_survey() {
         use crate::management::ManagementCommand;
@@ -4092,7 +4253,7 @@ order = 2\n"
         reporter.mark_transmitted();
         reporter.mark_acknowledged();
         let mut q2 = MessageQueue::new();
-        mm.tick_start(&mut q2, TdmaTime::default());
+        mm.tick_start(&mut q2, TdmaTime::from_int(1));
 
         assert_eq!(mm.reg_state, RegState::Idle);
         assert!(!mm.pending_scan_after_detach, "deferred-survey flag cleared once launched");
@@ -4120,14 +4281,14 @@ order = 2\n"
         let reporter = take_detach_reporter(&mut q);
         let mut q2 = MessageQueue::new();
         dispatcher.send(ControlCommand::Management(ManagementCommand::StopCellScan { handle: 54 }));
-        mm.tick_start(&mut q2, TdmaTime::default());
+        mm.tick_start(&mut q2, TdmaTime::from_int(1));
         assert!(!mm.pending_scan_after_detach, "deferred survey cancelled");
 
         // Complete the detach: no survey is launched.
         reporter.mark_transmitted();
         reporter.mark_acknowledged();
         let mut q3 = MessageQueue::new();
-        mm.tick_start(&mut q3, TdmaTime::default());
+        mm.tick_start(&mut q3, TdmaTime::from_int(2));
         assert_eq!(mm.reg_state, RegState::Idle);
         assert!(
             !q3.iter().any(|m| matches!(&m.msg, SapMsgInner::LmmMleScanReq(r) if r.start)),

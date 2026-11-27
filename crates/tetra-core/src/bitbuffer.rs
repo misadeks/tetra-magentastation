@@ -28,7 +28,7 @@ impl BitBuffer {
 
     /// Create a zeroed buffer capable of holding exactly `len_bits` bits.
     pub fn new(len_bits: usize) -> Self {
-        let byte_len = (len_bits + 7) / 8;
+        let byte_len = len_bits.div_ceil(8);
         BitBuffer {
             buffer: vec![0; byte_len],
             start: 0,
@@ -41,7 +41,7 @@ impl BitBuffer {
     /// Create a zeroed buffer with an inital capacity but zero length (end is set to 0).
     /// Writes to this buffer will automatically advance the end pointer and reallocate the buffer if needed
     pub fn new_autoexpand(initial_max_len_bits: usize) -> Self {
-        let byte_len = (initial_max_len_bits + 7) / 8;
+        let byte_len = initial_max_len_bits.div_ceil(8);
         BitBuffer {
             buffer: vec![0; byte_len],
             start: 0,
@@ -115,7 +115,7 @@ impl BitBuffer {
     pub fn from_bitbuffer(bitbuffer: &BitBuffer) -> Self {
         // Compute how many bits to copy when we want to perform byte-wise copy.
         let start_byte = bitbuffer.start / 8;
-        let end_byte = (bitbuffer.end + 7) / 8;
+        let end_byte = bitbuffer.end.div_ceil(8);
         let alloc_bits = (end_byte - start_byte) * 8;
 
         // Allocate new BitBuffer, copy data, and set offsets
@@ -132,7 +132,7 @@ impl BitBuffer {
     pub fn from_bitbuffer_pos(bitbuffer: &BitBuffer) -> Self {
         // Compute how many bits to copy when we want to perform byte-wise copy.
         let start_byte = bitbuffer.pos / 8;
-        let end_byte = (bitbuffer.end + 7) / 8;
+        let end_byte = bitbuffer.end.div_ceil(8);
         let alloc_bits = (end_byte - start_byte) * 8;
 
         // Allocate new BitBuffer, copy data, and set offsets
@@ -144,7 +144,8 @@ impl BitBuffer {
         buf
     }
 
-    /// Takes slice as parameter for output. Reads slice.len() bits from bitbuf[pos], and writes to output slice. 1 bit per byte.
+    /// Takes a slice for output. Reads `slice.len()` bits from the current position,
+    /// and writes to the output slice, one bit per byte.
     pub fn to_bitarr(&mut self, buf: &mut [u8]) {
         // TODO bounds check here, optimize performance
         let num_bits = buf.len();
@@ -180,18 +181,16 @@ impl BitBuffer {
     /// Peek `num_bits` at the current pos with signed offset, without advancing.
     /// Returns None on overflow or if `num_bits>64`.
     pub fn peek_bits_posoffset(&self, offset: isize, num_bits: usize) -> Option<u64> {
-        // let abs_offset = self.pos as isize + offset;
-        // tracing::trace!("peek_bits_posoffset: {} bits at {}", num_bits, self.pos as isize + offset);
-        // println!("peek_bits_offset: {} bits at {}", num_bits, self.pos as isize + offset);
-        let start_offset = self.pos - self.start + offset as usize;
+        let start_offset = self.pos.checked_sub(self.start)?.checked_add_signed(offset)?;
         self.peek_bits_startoffset(start_offset, num_bits)
     }
 
     /// Peek `num_bits` with offset from window start, without advancing.
     /// Returns None on overflow or if `num_bits>64`.
     pub fn peek_bits_startoffset(&self, offset: usize, num_bits: usize) -> Option<u64> {
-        let abs_pos = self.start + offset;
-        if num_bits > 64 || self.start + offset + num_bits > self.end {
+        let abs_pos = self.start.checked_add(offset)?;
+        let read_end = abs_pos.checked_add(num_bits)?;
+        if num_bits > 64 || read_end > self.end {
             return None;
         }
 
@@ -220,21 +219,21 @@ impl BitBuffer {
 
     /// Read `num_bits` at the current pos, advancing pos, and write them into the provided output slice as bytes
     pub fn read_bits_into_slice(&mut self, num_bits: usize, buf: &mut [u8]) -> Option<()> {
-        let num_bytes = (num_bits + 7) / 8;
+        let num_bytes = num_bits.div_ceil(8);
         assert!(buf.len() >= num_bytes, "output buffer too small for num_bits");
 
         let mut bits_remaining = num_bits;
-        for i in 0..num_bytes {
+        for byte in buf.iter_mut().take(num_bytes) {
             let bits_in_byte = usize::min(bits_remaining, 8);
             let read_byte = self.read_bits(bits_in_byte)? as u8;
-            buf[i] = read_byte << (8 - bits_in_byte);
+            *byte = read_byte << (8 - bits_in_byte);
             bits_remaining -= bits_in_byte;
         }
         Some(())
     }
 
     fn _realloc_tail(&mut self, new_cap_bits: usize) {
-        let new_cap_bytes = (new_cap_bits + 7) / 8;
+        let new_cap_bytes = new_cap_bits.div_ceil(8);
         assert!(
             new_cap_bytes >= self.buffer.len(),
             "new capacity must be larger than current buffer size"
@@ -299,7 +298,7 @@ impl BitBuffer {
 
             // Convert bytes from data array to u64 and xor with read val
             let mut xor_data = 0u64;
-            let db_chunk_bytes = (chunk_bits + 7) / 8;
+            let db_chunk_bytes = chunk_bits.div_ceil(8);
             for _ in 0..db_chunk_bytes {
                 xor_data <<= 8;
                 xor_data |= data[data_pos] as u64;
@@ -311,7 +310,7 @@ impl BitBuffer {
             // println!("xor_bytearr: chunk_bits {}, val {:X}, xor_data {:X}, xorred_data {:X}", chunk_bits, val, xor_data, xorred_data);
 
             // Seek back to where we were before reading
-            self.seek_rel(-1 * chunk_bits as isize);
+            self.seek_rel(-(chunk_bits as isize));
             self.write_bits(xorred_data, chunk_bits);
         }
         Some(())
@@ -325,7 +324,7 @@ impl BitBuffer {
                 // Advance end pointer and, realloc if needed
                 self._move_end(1);
             } else {
-                assert!(false, "write_bit would exceed buffer end");
+                panic!("write_bit would exceed buffer end");
             }
         }
 
@@ -376,7 +375,7 @@ impl BitBuffer {
             if self.flag_autoexpand {
                 self._move_end(num_bits);
             } else {
-                assert!(false, "write would exceed buffer end");
+                panic!("write would exceed buffer end");
             }
         }
 
@@ -444,8 +443,7 @@ impl BitBuffer {
 
     pub fn copy_bits_from_bitarr(&mut self, buf: &[u8]) {
         // TODO optimize performance
-        for i in 0..buf.len() {
-            let bit = buf[i];
+        for &bit in buf {
             assert!(
                 bit == 0 || bit == 1,
                 "copy_bits_from_bitarr: invalid byte `{}`; only '0' or '1' allowed",
@@ -464,7 +462,7 @@ impl BitBuffer {
     pub fn into_bitvec(self) -> Vec<u8> {
         let mut ret = Vec::with_capacity(self.get_len());
         for i in 0..self.get_len() {
-            ret.push(self.read_bit_at_unchecked(i));
+            ret.push(self.read_bit_at_unchecked(self.start + i));
         }
         ret
     }
@@ -559,11 +557,11 @@ impl BitBuffer {
     /// Dump bits in window [start, end) as a hex string (uppercase, no separators),
     /// grouping every 4 bits into one hex digit.  If the window length isn't
     /// a multiple of 4, the last nibble is padded on the right with zeros.
-
+    ///
     /// --- Dumps only the [start..end) window in hex ---
     pub fn dump_hex(&self) -> String {
         let len = self.end - self.start;
-        let n_nibbles = (len + 3) / 4;
+        let n_nibbles = len.div_ceil(4);
         let mut s = String::with_capacity(n_nibbles);
         for i in 0..n_nibbles {
             let bit_pos = self.start + i * 4;
@@ -593,7 +591,6 @@ impl BitBuffer {
     ///  - '<' just before bit `start`
     ///  - '^' just before bit `pos`
     ///  - '>' just before bit `end` (or at end if `end == capacity`)
-    /// If trim_to_window is true, contents outside of start/end are not printed.
     pub fn dump_bin_full(&self, print_markers: bool) -> String {
         self.raw_dump_bin(print_markers, print_markers, 0, self.buffer.len() * 8)
     }
@@ -908,6 +905,60 @@ mod tests {
         // even within capacity, peeking exactly to the end is allowed
         assert!(bb.peek_bits(10).is_some());
         assert_eq!(bb.get_pos(), 0);
+    }
+
+    #[test]
+    fn regression_signed_peeks_respect_nonzero_window_and_cursor() {
+        let mut bb = BitBuffer::from_bitstr("10011010");
+        bb.set_raw_pos(4);
+        bb.set_raw_start(2);
+        bb.set_raw_end(7);
+
+        assert_eq!(bb.peek_bits_posoffset(-2, 3), Some(0b011));
+        assert_eq!(bb.peek_bits_posoffset(-1, 3), Some(0b110));
+        assert_eq!(bb.peek_bits_posoffset(0, 3), Some(0b101));
+        assert_eq!(bb.peek_bits_posoffset(1, 2), Some(0b01));
+        assert_eq!(bb.peek_bits_posoffset(-3, 1), None);
+        assert_eq!(bb.peek_bits_posoffset(1, 3), None);
+        assert_eq!(bb.peek_bits_posoffset(3, 0), Some(0));
+        assert_eq!(bb.peek_bits_posoffset(4, 0), None);
+        assert_eq!(bb.get_raw_pos(), 4);
+    }
+
+    #[test]
+    fn regression_peek_arithmetic_overflow_returns_none() {
+        let mut bb = BitBuffer::from_bitstr("10110110");
+        assert_eq!(bb.peek_bits_posoffset(-1, 1), None);
+        assert_eq!(bb.peek_bits_posoffset(isize::MIN, 1), None);
+        assert_eq!(bb.peek_bits_posoffset(isize::MAX, 1), None);
+        bb.set_raw_pos(3);
+        bb.set_raw_start(3);
+        assert_eq!(bb.peek_bits_startoffset(usize::MAX, 1), None);
+        assert_eq!(bb.peek_bits_startoffset(1, usize::MAX), None);
+        assert_eq!(bb.peek_bits_startoffset(0, 65), None);
+        assert_eq!(bb.peek_bits(5), Some(0b10110));
+        assert_eq!(bb.get_raw_pos(), 3);
+    }
+
+    #[test]
+    fn regression_into_bitvec_exports_entire_window_not_backing_prefix_or_cursor() {
+        let mut bb = BitBuffer::from_bitstr("1001");
+        bb.set_raw_pos(2);
+        bb.set_raw_start(1);
+        assert_eq!(bb.to_bitstr(), "001");
+        assert_eq!(bb.into_bitvec(), vec![0, 0, 1]);
+
+        let mut bb = BitBuffer::from_bitstr("1011001010110101");
+        bb.set_raw_pos(12);
+        bb.set_raw_start(9);
+        bb.set_raw_end(14);
+        assert_eq!(bb.into_bitvec(), vec![0, 1, 1, 0, 1]);
+
+        let mut empty = BitBuffer::from_bitstr("1");
+        empty.seek(1);
+        empty.set_raw_start(1);
+        assert!(empty.into_bitvec().is_empty());
+        assert_eq!(BitBuffer::from_bitstr("001").into_bitvec(), vec![0, 0, 1]);
     }
 
     #[test]

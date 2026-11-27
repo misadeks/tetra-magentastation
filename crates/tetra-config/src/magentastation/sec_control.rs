@@ -42,6 +42,7 @@ pub struct CfgControlDto {
 ///
 /// Returns an error string if `ca_cert` is set but `use_tls` is `false`.
 pub fn apply_control_patch(src: CfgControlDto) -> Result<CfgControl, String> {
+    super::parsing::reject_unknown_fields("command", &src.extra)?;
     if src.ca_cert.is_some() && !src.use_tls {
         return Err("control: ca_cert requires use_tls = true".to_string());
     }

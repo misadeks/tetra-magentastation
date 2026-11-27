@@ -234,11 +234,7 @@ pub fn setup_logging_verbose() {
 /// Returns guards that must be kept alive for logging to continue working
 pub fn setup_logging_default(verbose_logfile: Option<String>) -> Option<LogGuards> {
     let stdout_filter = get_default_stdout_filter();
-    let logfile_and_filter = if let Some(file) = verbose_logfile {
-        Some((file, get_default_logfile_filter()))
-    } else {
-        None
-    };
+    let logfile_and_filter = verbose_logfile.map(|file| (file, get_default_logfile_filter()));
     setup_logging(stdout_filter, logfile_and_filter)
 }
 
@@ -250,10 +246,10 @@ pub fn get_default_stdout_filter() -> EnvFilter {
     // Honor an explicit RUST_LOG for on-demand verbose troubleshooting
     // (e.g. `RUST_LOG=debug`, or targeted `RUST_LOG=tetra_entities::mm=trace`).
     // When set it fully overrides the quiet defaults below.
-    if std::env::var_os("RUST_LOG").is_some() {
-        if let Ok(filter) = EnvFilter::try_from_default_env() {
-            return filter;
-        }
+    if std::env::var_os("RUST_LOG").is_some()
+        && let Ok(filter) = EnvFilter::try_from_default_env()
+    {
+        return filter;
     }
 
     // Quiet, steady-state-friendly default (base `info`). The high-frequency
@@ -281,6 +277,7 @@ fn setup_logging(stdout_filter: EnvFilter, outfile: Option<(String, EnvFilter)>)
         // Setup logging with a verbose log file
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(outfile)
             .expect("Failed to open log file");

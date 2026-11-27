@@ -161,12 +161,64 @@ pub enum ControlCommand {
     Management(ManagementCommand),
 }
 
-/// Response sent back to the remote command server after processing a [`Command`].
+impl ControlCommand {
+    /// Negative admission response using the existing external response schema.
+    pub fn rejection(self, detail: &str) -> Option<ControlResponse> {
+        let detail = detail.to_string();
+        Some(match self {
+            Self::SendSds { handle, .. } => ControlResponse::SendSdsResponse { handle, success: false },
+            Self::TnmmRegistration { handle, .. }
+            | Self::TnmmDeregistration { handle, .. }
+            | Self::TnmmAttachDetachGroupIdentity { handle, .. }
+            | Self::TnmmStatus { handle, .. }
+            | Self::TnmmEnergySaving { handle, .. } => ControlResponse::TnmmAck {
+                handle,
+                accepted: false,
+                detail: Some(detail),
+            },
+            Self::TnccSetup { handle, .. }
+            | Self::TnccSetupResponse { handle, .. }
+            | Self::TnccComplete { handle, .. }
+            | Self::TnccTx { handle, .. }
+            | Self::TnccDtmf { handle, .. }
+            | Self::TnccRelease { handle, .. } => ControlResponse::TnccAck {
+                handle,
+                accepted: false,
+                detail: Some(detail),
+            },
+            Self::TnsdsUnitdata { handle, .. }
+            | Self::TnsdsStatus { handle, .. }
+            | Self::TnsdsSendMessage { handle, .. }
+            | Self::TnsdsSendReport { handle, .. }
+            | Self::TnsdsCancel { handle, .. } => ControlResponse::TnsdsAck {
+                handle,
+                accepted: false,
+                detail: Some(detail),
+            },
+            Self::Management(command) => {
+                let (ManagementCommand::GetState { handle }
+                | ManagementCommand::GetInterfaceVersion { handle }
+                | ManagementCommand::GetConfig { handle }
+                | ManagementCommand::SetConfig { handle, .. }
+                | ManagementCommand::ApplyConfig { handle }
+                | ManagementCommand::ActivateScanlist { handle, .. }
+                | ManagementCommand::SetCellSelectionMode { handle, .. }
+                | ManagementCommand::StartCellScan { handle }
+                | ManagementCommand::StopCellScan { handle }
+                | ManagementCommand::CampOnCell { handle, .. }) = command;
+                ControlResponse::Management(ManagementResponse::Error { handle, message: detail })
+            }
+            Self::CommandA { .. } | Self::TestCmdB { .. } | Self::MsUplinkSpeech { .. } => return None,
+        })
+    }
+}
+
+/// Response sent back to the remote command server after processing a [`ControlCommand`].
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub enum ControlResponse {
-    /// Response to [`Command::CommandA`].
+    /// Response to [`ControlCommand::CommandA`].
     CommandAResponse { handle: u32, result: u32 },
-    /// Response to [`Command::SendSds`].
+    /// Response to [`ControlCommand::SendSds`].
     SendSdsResponse { handle: u32, success: bool },
 
     /// Transport-level acknowledgement that a TNMM request was accepted for

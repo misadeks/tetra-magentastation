@@ -4,7 +4,7 @@ use tetra_core::expect_pdu_type;
 use tetra_core::typed_pdu_fields::*;
 use tetra_core::{BitBuffer, pdu_parse_error::PduParseErr};
 
-use crate::mm::enums::location_update_type::LocationUpdateType;
+use crate::mm::enums::location_update_accept_type::LocationUpdateAcceptType;
 use crate::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
 use crate::mm::enums::type34_elem_id_dl::MmType34ElemIdDl;
 use crate::mm::fields::energy_saving_information::EnergySavingInformation;
@@ -19,7 +19,7 @@ use crate::mm::fields::group_identity_location_accept::GroupIdentityLocationAcce
 #[derive(Debug)]
 pub struct DLocationUpdateAccept {
     /// Type1, 3 bits, Location update accept type
-    pub location_update_accept_type: LocationUpdateType,
+    pub location_update_accept_type: LocationUpdateAcceptType,
     /// Type2, 24 bits, ASSI/(V)ASSI of MS,
     pub ssi: Option<u64>,
     /// Type2, 24 bits, MNI of MS,
@@ -32,15 +32,15 @@ pub struct DLocationUpdateAccept {
     pub scch_information_and_distribution_on_18th_frame: Option<u64>,
     /// Type4, See note,
     pub new_registered_area: Option<Type4FieldGeneric>,
-    /// Type3, See ETSI EN 300 392-7 [8],
+    /// Type3, See ETSI EN 300 392-7 \[8\],
     pub security_downlink: Option<Type3FieldGeneric>,
     /// Type3, See note,
     pub group_identity_location_accept: Option<GroupIdentityLocationAccept>,
     /// Type3, See note,
     pub default_group_attachment_lifetime: Option<Type3FieldGeneric>,
-    /// Type3, See ETSI EN 300 392-7 [8],
+    /// Type3, See ETSI EN 300 392-7 \[8\],
     pub authentication_downlink: Option<Type3FieldGeneric>,
-    /// Type4, See ETSI EN 300 392-7 [8],
+    /// Type4, See ETSI EN 300 392-7 \[8\],
     pub group_identity_security_related_information: Option<Type4FieldGeneric>,
     /// Type3, Cell type control
     pub cell_type_control: Option<Type3FieldGeneric>,
@@ -48,7 +48,6 @@ pub struct DLocationUpdateAccept {
     pub proprietary: Option<Type3FieldGeneric>,
 }
 
-#[allow(unreachable_code)] // TODO FIXME review, finalize and remove this
 impl DLocationUpdateAccept {
     /// Parse from BitBuffer
     pub fn from_bitbuf(buffer: &mut BitBuffer) -> Result<Self, PduParseErr> {
@@ -57,7 +56,7 @@ impl DLocationUpdateAccept {
 
         // Type1
         let val: u64 = buffer.read_field(3, "location_update_accept_type")?;
-        let result = LocationUpdateType::try_from(val);
+        let result = LocationUpdateAcceptType::try_from(val);
         let location_update_accept_type = match result {
             Ok(x) => x,
             Err(_) => {
@@ -142,7 +141,7 @@ impl DLocationUpdateAccept {
         // PDU Type
         buffer.write_bits(MmPduTypeDl::DLocationUpdateAccept.into_raw(), 4);
         // Type1
-        buffer.write_bits(self.location_update_accept_type as u64, 3);
+        buffer.write_bits(self.location_update_accept_type.into_raw(), 3);
 
         // Check if any optional field present and place o-bit
         let obit = self.ssi.is_some()
@@ -258,6 +257,74 @@ mod tests {
     use tetra_core::debug;
 
     use super::*;
+
+    #[test]
+    fn regression_accept_uses_accept_enum_for_all_wire_values() {
+        let expected = [
+            LocationUpdateAcceptType::RoamingLocationUpdating,
+            LocationUpdateAcceptType::TemporaryRegistration,
+            LocationUpdateAcceptType::PeriodicLocationUpdating,
+            LocationUpdateAcceptType::ItsiAttach,
+            LocationUpdateAcceptType::ServiceRestorationRoamingLocationUpdating,
+            LocationUpdateAcceptType::MigratingOrServiceRestorationMigratingLocationUpdating,
+            LocationUpdateAcceptType::DemandLocationUpdating,
+            LocationUpdateAcceptType::DisabledMsUpdating,
+        ];
+        for (raw, accept_type) in expected.into_iter().enumerate() {
+            let wire = format!("0101{raw:03b}0");
+            let mut input = BitBuffer::from_bitstr(&wire);
+            let pdu = DLocationUpdateAccept::from_bitbuf(&mut input).unwrap();
+            assert_eq!(pdu.location_update_accept_type, accept_type);
+            assert_eq!(input.get_len_remaining(), 0);
+            let mut output = BitBuffer::new(8);
+            pdu.to_bitbuf(&mut output).unwrap();
+            assert_eq!(output.to_bitstr(), wire);
+        }
+    }
+
+    #[test]
+    fn regression_accept_preserves_opaque_optional_payload() {
+        let mut pdu = DLocationUpdateAccept::from_bitbuf(&mut BitBuffer::from_bitstr("01010010")).unwrap();
+        pdu.proprietary = Some(Type3FieldGeneric {
+            field_id: MmType34ElemIdDl::Proprietary.into_raw(),
+            len: 96,
+            data: vec![0xff, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x00, 0x42, 0x81],
+        });
+        let mut wire = BitBuffer::new_autoexpand(32);
+        pdu.to_bitbuf(&mut wire).unwrap();
+        wire.seek(0);
+        let parsed = DLocationUpdateAccept::from_bitbuf(&mut wire).unwrap();
+        assert_eq!(parsed.location_update_accept_type, LocationUpdateAcceptType::TemporaryRegistration);
+        assert_eq!(parsed.proprietary, pdu.proprietary);
+        assert_eq!(wire.get_len_remaining(), 0);
+        let mut reencoded = BitBuffer::new_autoexpand(32);
+        parsed.to_bitbuf(&mut reencoded).unwrap();
+        assert_eq!(reencoded.to_bitstr(), wire.to_bitstr());
+    }
+
+    #[test]
+    fn regression_accept_malformed_type4_returns_error_without_consuming_element() {
+        for (length, payload_bits) in [(5, 0), (86, 64)] {
+            let mut buffer = BitBuffer::new_autoexpand(128);
+            buffer.write_bits(MmPduTypeDl::DLocationUpdateAccept.into_raw(), 4);
+            buffer.write_bits(LocationUpdateAcceptType::TemporaryRegistration.into_raw(), 3);
+            buffer.write_bits(1, 1);
+            buffer.write_zeroes(5); // No Type-2 fields.
+            let element_start = buffer.get_pos();
+            typed::write_type34_header_generic(&mut buffer, MmType34ElemIdDl::NewRegisteredArea.into_raw());
+            buffer.write_bits(length, 11);
+            buffer.write_bits(1, 6);
+            buffer.write_zeroes(payload_bits);
+            buffer.seek(0);
+            let result = DLocationUpdateAccept::from_bitbuf(&mut buffer);
+            if length == 5 {
+                assert!(matches!(result, Err(PduParseErr::InvalidValue { value: 5, .. })));
+            } else {
+                assert!(matches!(result, Err(PduParseErr::BufferEnded { .. })));
+            }
+            assert_eq!(buffer.get_pos(), element_start);
+        }
+    }
 
     #[test]
     fn test_d_location_update_accept_with_group_identity_attachment() {

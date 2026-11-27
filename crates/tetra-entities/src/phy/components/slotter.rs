@@ -4,14 +4,12 @@ use crate::phy::components::burst_consts::*;
 
 #[allow(non_upper_case_globals)]
 pub mod bitseq {
-    /// Clause 9.4.4.3.2 Normal Training Sequence 1.
-    pub const n: [u8; 22] = [1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0];
-    /// Clause 9.4.4.3.2 Normal Training Sequence 2.
-    pub const p: [u8; 22] = [0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0];
     /// Clause 9.4.4.3.3 Extended Training Sequence.
-    pub const x: [u8; 30] = [
-        1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1,
-    ];
+    pub use crate::phy::components::train_consts::SEQ_EXT_AS_ARR as x;
+    /// Clause 9.4.4.3.2 Normal Training Sequence 1.
+    pub use crate::phy::components::train_consts::SEQ_NORM1_AS_ARR as n;
+    /// Clause 9.4.4.3.2 Normal Training Sequence 2.
+    pub use crate::phy::components::train_consts::SEQ_NORM2_AS_ARR as p;
     /// Clause 9.4.4.3.5 Tail Bits.
     pub const t: [u8; 4] = [1, 1, 0, 0];
 }
@@ -77,5 +75,13 @@ mod tests {
         assert_eq!(&burst[CUB_TRAINING_OFFSET..CUB_BLK2_OFFSET], &bitseq::x);
         assert_eq!(&burst[CUB_BLK2_OFFSET..CUB_BLK2_OFFSET + CUB_BLK_BITS], &blk[CUB_BLK_BITS..]);
         assert_eq!(&burst[CUB_TAILBITS_OFFSET..CUB_BURST_BITS], &bitseq::t);
+    }
+
+    #[test]
+    fn cub_extended_training_known_vector() {
+        let burst = build_cub(&[0; 168]);
+        let training: String = burst[88..118].iter().map(|bit| char::from(b'0' + bit)).collect();
+        // ETSI TS 100 392-2 cl. 9.4.4.3.3, not the transmitter's own table.
+        assert_eq!(training, "100111010000111010011101000011");
     }
 }

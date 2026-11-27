@@ -45,6 +45,12 @@ The offline backend instantiates no PHY and produces no TDMA ticks. Requests
 requiring protocol time remain deferred until a real downlink exists; offline
 management is not a radio simulator.
 
+Each entity admits at most 64 queued control commands. MM also defers at most
+64 unsynchronized requests; excess requests receive a correlated negative
+acknowledgement (or a management `Error`). Speech remains fire-and-forget.
+WebSocket messages are limited to one MiB. These ingress bounds are not a
+whole-process memory bound.
+
 ## Plane B: non-standard management/provisioning
 
 These are implementation-defined, not standardized TETRA PEI commands.
@@ -88,6 +94,10 @@ exit 75. Examples are
 sentinel preserves the corresponding active secret. Disk TOML still stores the
 real password. The radio must have write access to its startup TOML; write-back
 normalizes formatting/comments. See [persistence](../../docs/MS_GETTING_STARTED.md#provisioning-and-persistence).
+
+Shutdown joins the control worker after its final responses are flushed.
+Connection/handshake and writes have bounded timeouts; an undeliverable response
+is reported as a shutdown delivery failure, not silently treated as delivered.
 
 These management calls work without synchronization. Other commands wait for
 real protocol ticks, so the offline backend is useful for provisioning but

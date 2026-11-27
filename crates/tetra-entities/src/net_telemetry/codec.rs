@@ -193,7 +193,7 @@ mod tests {
             energy_economy_mode: None,
             energy_economy_mode_status: None,
             group_identities: Some(vec![GroupIdentity {
-                gtsi: 0x0000_0DEAD_BEEF & 0xFFFF_FFFF_FFFF,
+                gtsi: 0x0000_0000_DEAD_BEEF & 0xFFFF_FFFF_FFFF,
                 group_identity_attach_detach_type_identifier: GroupIdentityAttachDetachTypeIdentifier::Attachment,
                 group_identity_lifetime: Some(GroupIdentityLifetime::AttachmentNeededForNextItsiAttach),
                 class_of_usage: Some(ClassOfUsage::ClassOfUsage4),

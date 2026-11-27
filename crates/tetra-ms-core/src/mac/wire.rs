@@ -99,6 +99,7 @@ pub fn access_fragment(issi: u32, sdu: BitView<'_>) -> Result<(MacBlock, Fragmen
         (1, FragEndKind::MacEndUl)
     } else {
         let total_slots = fragment_slots(remaining)?;
+        FragmentBlocks::build(sdu.window(FIRST, remaining)?, total_slots)?;
         (u32::from(total_slots), FragEndKind::MacFragUl { total_slots })
     };
     let mut block = MacBlock::new();
@@ -111,13 +112,17 @@ pub fn access_fragment(issi: u32, sdu: BitView<'_>) -> Result<(MacBlock, Fragmen
     Ok((block, remainder, kind))
 }
 
+/// MAC-FRAG-UL, with a fill delimiter for a short continuation (21.4.2.4).
 pub fn fragment(sdu: BitView<'_>) -> Result<MacBlock, BitError> {
-    if sdu.len() != FRAG_UL_SDU_BITS {
+    if sdu.is_empty() || sdu.len() > FRAG_UL_SDU_BITS {
         return Err(BitError::InvalidValue);
     }
+    let fill = FRAG_UL_SDU_BITS - sdu.len();
     let mut block = MacBlock::new();
-    block.push(4, 0b0100)?;
+    block.push(3, 0b010)?;
+    block.push(1, u32::from(fill != 0))?;
     block.append(sdu)?;
+    finish(&mut block, fill, SCH_F_BITS)?;
     Ok(block)
 }
 
@@ -156,7 +161,8 @@ fn end(sdu: BitView<'_>, half: bool) -> Result<MacBlock, BitError> {
     Ok(block)
 }
 
-/// Bounded, ordered full-slot fragments. Rejected sizes never yield a partial plan.
+/// Bounded, ordered full-slot fragments. Short continuations use fill so the
+/// final MAC-END always contains data. Rejected sizes never yield a partial plan.
 #[derive(Debug, Clone)]
 pub struct FragmentBlocks {
     blocks: [MacBlock; MAX_UL_FRAG_SLOTS],
@@ -169,20 +175,122 @@ impl FragmentBlocks {
         if !(1..=MAX_UL_FRAG_SLOTS).contains(&count) {
             return Err(BitError::Capacity);
         }
-        let prefix = (slots - 1) as u16 * FRAG_UL_SDU_BITS;
-        let tail = remainder.len().checked_sub(prefix).ok_or(BitError::InvalidValue)?;
-        if tail == 0 || tail > END_UL_SDU_BITS {
+        let expected = if remainder.len() <= END_UL_SDU_BITS {
+            1
+        } else {
+            fragment_slots(remainder.len())?
+        };
+        if slots != expected || remainder.is_empty() {
             return Err(BitError::InvalidValue);
         }
         let mut blocks = core::array::from_fn(|_| MacBlock::new());
+        let mut prefix = 0;
         for (i, block) in blocks[..count - 1].iter_mut().enumerate() {
-            *block = fragment(remainder.window(i as u16 * FRAG_UL_SDU_BITS, FRAG_UL_SDU_BITS)?)?;
+            // MAC-FRAG permits fill (21.4.2.4). Keep at least one SDU bit
+            // for MAC-END rather than creating a zero/negative final tail.
+            let len = if i == count - 2 {
+                (remainder.len() - prefix - 1).min(FRAG_UL_SDU_BITS)
+            } else {
+                FRAG_UL_SDU_BITS
+            };
+            *block = fragment(remainder.window(prefix, len)?)?;
+            prefix += len;
         }
+        let tail = remainder.len() - prefix;
         blocks[count - 1] = end_ul(remainder.window(prefix, tail)?)?;
         Ok(Self { blocks, len: slots })
     }
 
     pub fn as_slice(&self) -> &[MacBlock] {
         &self.blocks[..usize::from(self.len)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(block: BitView<'_>, header: u16, end: u16, fill_offset: u16) -> BitView<'_> {
+        let mut stop = end;
+        if block.read(fill_offset, 1).unwrap() != 0 {
+            while block.read(stop - 1, 1).unwrap() == 0 {
+                stop -= 1;
+            }
+            stop -= 1; // fill delimiter
+        }
+        block.window(header, stop - header).unwrap()
+    }
+
+    #[test]
+    fn every_fragmented_sdu_length_roundtrips_with_consistent_reservations() {
+        // Independent field widths from MAC-ACCESS / MAC-FRAG / MAC-END
+        // (21.4.3.1, 21.4.2.4, 21.4.2.5), including all ten-bit holes.
+        let bytes = [0xa5; 204];
+        for len in 57..=1630 {
+            let source = BitView::new(&bytes, len).unwrap();
+            let (first, remainder, kind) = access_fragment(0x123456, source).unwrap();
+            assert_eq!(first.view().read(0, 5), Ok(0));
+            assert_eq!(first.view().read(5, 24), Ok(0x123456));
+            assert_eq!(first.view().read(29, 3), Ok(7));
+            let mut recovered = FragmentBits::new();
+            recovered.append(first.view().window(36, 56).unwrap()).unwrap();
+            let reservation = first.view().read(32, 4).unwrap();
+            match kind {
+                FragEndKind::MacEndHu => {
+                    assert_eq!(reservation, 0);
+                    let end = end_hu(remainder.view()).unwrap();
+                    assert_eq!(end.view().read(0, 1), Ok(1));
+                    let length = end.view().read(3, 4).unwrap() as u16 * 8;
+                    recovered.append(payload(end.view(), 7, length, 1)).unwrap();
+                }
+                FragEndKind::MacEndUl => {
+                    assert_eq!(reservation, 1);
+                    let end = end_ul(remainder.view()).unwrap();
+                    assert_eq!(end.view().read(0, 3), Ok(3));
+                    let length = end.view().read(4, 6).unwrap() as u16 * 8;
+                    recovered.append(payload(end.view(), 10, length, 3)).unwrap();
+                }
+                FragEndKind::MacFragUl { total_slots } => {
+                    assert_eq!(reservation, u32::from(total_slots));
+                    let plan = FragmentBlocks::build(remainder.view(), total_slots).unwrap();
+                    assert_eq!(plan.as_slice().len(), usize::from(total_slots));
+                    for (index, block) in plan.as_slice().iter().enumerate() {
+                        let last = index == usize::from(total_slots) - 1;
+                        assert_eq!(block.len(), 268);
+                        assert_eq!(block.view().read(0, 3), Ok(if last { 3 } else { 2 }));
+                        let (header, end) = if last {
+                            (10, block.view().read(4, 6).unwrap() as u16 * 8)
+                        } else {
+                            (4, 268)
+                        };
+                        recovered.append(payload(block.view(), header, end, 3)).unwrap();
+                    }
+                }
+            }
+            assert_eq!(recovered.len(), len, "SDU length {len}");
+            for offset in 0..len {
+                assert_eq!(recovered.view().read(offset, 1), source.read(offset, 1), "SDU {len}, bit {offset}");
+            }
+        }
+        assert_eq!(
+            access_fragment(1, BitView::new(&bytes, 1631).unwrap()).err(),
+            Some(BitError::Capacity)
+        );
+    }
+
+    #[test]
+    fn short_fragment_fill_vector_and_invalid_plans_are_atomic() {
+        let bytes = [0xa5; 33];
+        let fragment = fragment(BitView::new(&bytes, 263).unwrap()).unwrap();
+        assert_eq!(fragment.view().read(0, 8), Ok(0x5a));
+        assert_eq!(fragment.view().read(267, 1), Ok(1)); // one-bit fill
+        for len in [255, 264, 519, 528] {
+            let bytes = [0x80; 66];
+            let bits = BitView::new(&bytes, len).unwrap();
+            let slots = fragment_slots(len).unwrap();
+            assert!(FragmentBlocks::build(bits, slots).is_ok());
+            assert!(FragmentBlocks::build(bits, slots - 1).is_err());
+            assert!(FragmentBlocks::build(bits, slots + 1).is_err());
+        }
     }
 }

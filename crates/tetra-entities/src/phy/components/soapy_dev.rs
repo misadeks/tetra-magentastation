@@ -142,7 +142,7 @@ impl RxTxDevSoapySdr {
     /// Install the cooperative shutdown flag (MS mode). Passed the process-wide
     /// `is_running` flag so the blocking RX loop can bail out promptly when a
     /// shutdown is requested even while the MS is not yet synchronized to a base
-    /// station (see [`RxTxDevSoapySdr::run_flag`]).
+    /// station.
     pub fn set_run_flag(&mut self, flag: Arc<AtomicBool>) {
         self.run_flag = Some(flag);
     }
@@ -302,16 +302,17 @@ impl RxTxDev for RxTxDevSoapySdr {
         }
     }
 
-    fn set_tx_frequency(&mut self, carrier_hz: f64) {
+    fn set_tx_frequency(&mut self, carrier_hz: f64) -> Result<(), RxTxDevError> {
         // Move the TX LO only. The uplink modulator was built at the provisional
         // TX centre (digital offset 0), so the burst lands on `carrier_hz` with
         // no channelizer/modulator rebuild — symmetric with set_rx_frequency but
         // without the RX intermediate-frequency offset. Used by the camp-time
         // uplink derivation once the cell's duplex parameters are known
         // (EN 300 392-2 cl. 18.4.2.2).
-        if let Err(e) = self.sdr.set_tx_frequency(carrier_hz) {
+        self.sdr.set_tx_frequency(carrier_hz).map_err(|e| {
             tracing::error!("SoapySDR: failed to retune TX to {carrier_hz} Hz: {e}");
-        }
+            RxTxDevError::TxTuneError
+        })
     }
 }
 
@@ -407,6 +408,13 @@ impl RxDsp {
     }
 
     fn receive_block(&mut self, sdr: &mut soapyio::SoapyIo) -> Result<(), RxTxDevError> {
+        self.receive_block_with(|buffer| sdr.receive(buffer))
+    }
+
+    fn receive_block_with(
+        &mut self,
+        mut receive: impl FnMut(&mut [ComplexSample]) -> Result<soapyio::RxResult, RxTxDevError>,
+    ) -> Result<(), RxTxDevError> {
         self.rx_block_count += 1;
 
         // Copy overlapping part from previous block to the beginning
@@ -415,7 +423,11 @@ impl RxDsp {
         self.rx_buffer_i = self.rx_block_size.overlap;
 
         loop {
-            let result = sdr.receive(&mut self.rx_buffer[self.rx_buffer_i..])?;
+            let available = self.rx_buffer.len() - self.rx_buffer_i;
+            let result = receive(&mut self.rx_buffer[self.rx_buffer_i..])?;
+            if result.len == 0 || result.len > available {
+                return Err(RxTxDevError::RxReadError);
+            }
 
             let block_size = self.rx_block_size.new as SampleCount;
             let expected_count = self.rx_block_count as SampleCount * block_size + self.rx_buffer_i as SampleCount;
@@ -430,10 +442,11 @@ impl RxDsp {
                 let next_count = result.count + result.len as SampleCount;
                 // div_euclid always rounds down (towards negative numbers),
                 // so use it with negations to round up to the next block.
-                let next_possible_block = -next_count.div_euclid(-block_size) + 1;
+                let next_possible_block = -(-next_count).div_euclid(block_size) + 1;
                 let next_block_beginning = next_possible_block * block_size;
 
                 let mut samples_to_skip = next_block_beginning - next_count;
+                let mut expected_count = next_count;
 
                 tracing::warn!(
                     "Lost {} samples, skipping {} more samples and {} processing blocks",
@@ -447,8 +460,19 @@ impl RxDsp {
 
                 // Repeat reads until the correct number of samples has been skipped.
                 while samples_to_skip > 0 {
-                    let result = sdr.receive(&mut self.rx_buffer[0..samples_to_skip as usize])?;
-                    samples_to_skip -= result.len as SampleCount;
+                    let request = samples_to_skip.min(self.rx_buffer.len() as SampleCount) as usize;
+                    let result = receive(&mut self.rx_buffer[..request])?;
+                    if result.len == 0 || result.len > request {
+                        return Err(RxTxDevError::RxReadError);
+                    }
+                    let next_count = result.count + result.len as SampleCount;
+                    if result.count != expected_count {
+                        // Discard reads may themselves cross another gap. Use
+                        // their timestamp, not only their length, to realign.
+                        self.rx_block_count = -(-next_count).div_euclid(block_size) + 1;
+                    }
+                    expected_count = next_count;
+                    samples_to_skip = self.rx_block_count * block_size - next_count;
                 }
             } else {
                 self.rx_buffer_i += result.len;
@@ -478,7 +502,6 @@ impl RxDsp {
 struct TxDsp {
     fcfb: fcfb::SynthesisOutputProcessor,
     block_count: fcfb::BlockCount,
-    initial_time: i64,
     modulators: Vec<ModulatorChannel>,
 }
 
@@ -502,7 +525,6 @@ impl TxDsp {
         Self {
             fcfb,
             block_count: 0,
-            initial_time: 0, // TODO: get it from RX
             modulators,
         }
     }
@@ -767,21 +789,22 @@ impl ModulatorChannel {
         // block is generated the burst is perpetually "in the past" and only
         // silence is transmitted (SN0 never fires). `ahead_samples` shows the
         // sign/magnitude of the misalignment for tuning `MS_TX_SAMPLE_DELAY`.
-        if tx_slot.slot.is_some() && self.diag_last_time != Some(tx_slot.time) {
-            if let Some(slot_begin) = self.modulator.ul_slot_begin(tx_slot) {
-                let block_first = block_count as SampleCount * buf.len() as SampleCount;
-                let block_last = block_first + buf.len() as SampleCount;
-                tracing::debug!(
-                    ts = %tx_slot.time,
-                    block_count,
-                    block_first,
-                    block_last,
-                    slot_begin,
-                    ahead_samples = slot_begin - block_first,
-                    "Modulator(Ul): pending burst vs TX generation window"
-                );
-                self.diag_last_time = Some(tx_slot.time);
-            }
+        if tx_slot.slot.is_some()
+            && self.diag_last_time != Some(tx_slot.time)
+            && let Some(slot_begin) = self.modulator.ul_slot_begin(tx_slot)
+        {
+            let block_first = block_count as SampleCount * buf.len() as SampleCount;
+            let block_last = block_first + buf.len() as SampleCount;
+            tracing::debug!(
+                ts = %tx_slot.time,
+                block_count,
+                block_first,
+                block_last,
+                slot_begin,
+                ahead_samples = slot_begin - block_first,
+                "Modulator(Ul): pending burst vs TX generation window"
+            );
+            self.diag_last_time = Some(tx_slot.time);
         }
 
         while self.buffer_i < buf.len() {
@@ -804,5 +827,126 @@ impl ModulatorChannel {
         let _ = self.buffer.prepare_for_new_samples();
         self.buffer_i = 0;
         true
+    }
+}
+
+#[cfg(test)]
+mod rx_tests {
+    use super::*;
+    use crate::phy::components::soapy_time::{ticks_to_time_ns, time_ns_to_ticks};
+    use std::collections::VecDeque;
+
+    const CLOCK_ORIGIN: i64 = 1_234_567_890;
+    const SAMPLE_RATE: f64 = 600_000.0;
+
+    struct MockTransport {
+        reads: VecDeque<(Option<SampleCount>, usize)>,
+        next_count: SampleCount,
+        requests: Vec<usize>,
+        timestamps: Vec<i64>,
+    }
+
+    impl MockTransport {
+        fn new(reads: impl IntoIterator<Item = (Option<SampleCount>, usize)>) -> Self {
+            Self {
+                reads: reads.into_iter().collect(),
+                next_count: 0,
+                requests: Vec::new(),
+                timestamps: Vec::new(),
+            }
+        }
+
+        fn receive(&mut self, buffer: &mut [ComplexSample]) -> Result<soapyio::RxResult, RxTxDevError> {
+            self.requests.push(buffer.len());
+            let (count, limit) = self.reads.pop_front().unwrap_or((None, usize::MAX));
+            let timestamp = CLOCK_ORIGIN + ticks_to_time_ns(count.unwrap_or(self.next_count), SAMPLE_RATE);
+            self.timestamps.push(timestamp);
+            let count = time_ns_to_ticks(timestamp - CLOCK_ORIGIN, SAMPLE_RATE);
+            let len = limit.min(buffer.len());
+            for (i, sample) in buffer[..len].iter_mut().enumerate() {
+                *sample = ComplexSample::new((count + i as i64) as f32, 0.0);
+            }
+            self.next_count = count + len as i64;
+            Ok(soapyio::RxResult { count, len })
+        }
+    }
+
+    fn dsp() -> RxDsp {
+        let fcfb = fcfb::AnalysisInputProcessor::new(
+            &mut FftPlanner::new(),
+            fcfb::AnalysisInputParameters {
+                fft_size: 1200,
+                center_frequency: 430_425_000.0,
+                sample_rate: SAMPLE_RATE,
+                overlap: fcfb::Overlap::O1_4,
+            },
+        );
+        let rx_block_size = fcfb.input_block_size();
+        assert_eq!((rx_block_size.new, rx_block_size.overlap), (900, 300));
+        RxDsp {
+            rx_fcfb: fcfb,
+            rx_block_size,
+            rx_buffer: vec![ComplexSample::ZERO; 1200],
+            rx_buffer_i: 0,
+            rx_block_count: 0,
+            downlinks: Vec::new(),
+        }
+    }
+
+    fn assert_block(dsp: &RxDsp, beginning: SampleCount) {
+        for (i, sample) in dsp.rx_buffer.iter().enumerate() {
+            assert_eq!(sample.re, (beginning + i as i64) as f32, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn gap_discard_larger_than_buffer_is_chunked_and_next_block_overlaps() {
+        let mut dsp = dsp();
+        let mut transport = MockTransport::new([(Some(1800), 100)]);
+        dsp.receive_block_with(|buffer| transport.receive(buffer)).unwrap();
+        assert_eq!(transport.requests, [900, 1200, 500, 1200]);
+        assert_eq!(transport.timestamps[0] - CLOCK_ORIGIN, 3_000_000);
+        assert_eq!(transport.timestamps[3] - CLOCK_ORIGIN, 6_000_000);
+        assert_eq!(dsp.rx_block_count, 4);
+        assert_block(&dsp, 3600);
+        dsp.receive_block_with(|buffer| transport.receive(buffer)).unwrap();
+        assert_eq!(dsp.rx_block_count, 5);
+        assert_block(&dsp, 4500);
+    }
+
+    #[test]
+    fn another_gap_during_discard_realigns_from_timestamp() {
+        // End 5100 rounds up to block 6, then one block is skipped: 7*900=6300.
+        // End 1800 is already on block 2, so the next complete block starts at 2700.
+        for (second_count, expected_beginning) in [(5000, 6300), (1700, 2700)] {
+            let mut dsp = dsp();
+            let mut transport = MockTransport::new([(Some(1800), 100), (Some(second_count), 100)]);
+            dsp.receive_block_with(|buffer| transport.receive(buffer)).unwrap();
+            assert!(transport.requests.iter().all(|&len| len <= 1200 && len > 0));
+            assert_eq!(dsp.rx_block_count, expected_beginning / 900);
+            assert_block(&dsp, expected_beginning);
+            assert_eq!(time_ns_to_ticks(transport.timestamps[1] - CLOCK_ORIGIN, SAMPLE_RATE), second_count);
+        }
+    }
+
+    #[test]
+    fn later_gap_while_filling_drops_partial_block() {
+        let mut dsp = dsp();
+        let mut transport = MockTransport::new([(Some(1800), 100), (None, 1200), (None, 500), (None, 100), (Some(9000), 80)]);
+        dsp.receive_block_with(|buffer| transport.receive(buffer)).unwrap();
+        assert_eq!(dsp.rx_block_count, 12);
+        assert_block(&dsp, 10800);
+    }
+
+    #[test]
+    fn zero_length_read_is_rejected_in_fill_and_discard() {
+        for reads in [vec![(Some(1200), 0)], vec![(Some(1800), 100), (None, 0)]] {
+            let mut dsp = dsp();
+            let mut transport = MockTransport::new(reads);
+            assert_eq!(
+                dsp.receive_block_with(|buffer| transport.receive(buffer)),
+                Err(RxTxDevError::RxReadError)
+            );
+        }
     }
 }

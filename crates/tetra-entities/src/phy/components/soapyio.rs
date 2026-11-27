@@ -99,7 +99,7 @@ impl SoapyIo {
 
         let mode = cfg.config().stack_mode;
 
-        let (dev, sdr_settings) = open_device(&soapy_cfg, mode)?;
+        let (dev, sdr_settings) = open_device(soapy_cfg, mode)?;
 
         let rx_ch = sdr_settings.rx_ch;
         let tx_ch = sdr_settings.tx_ch;
@@ -410,10 +410,7 @@ struct OpenedDevice {
 }
 
 fn open_given_device(dev_args: soapysdr::Args) -> Result<OpenedDevice, soapysdr::Error> {
-    let soapyremote_used = match dev_args.get("driver") {
-        Some("remote") => true,
-        _ => false,
-    };
+    let soapyremote_used = matches!(dev_args.get("driver"), Some("remote"));
     tracing::info!("Trying to open a device with arguments: {}", dev_args);
 
     let dev_args_copy: soapysdr::Args = dev_args.iter().collect();
@@ -459,15 +456,14 @@ fn open_given_device(dev_args: soapysdr::Args) -> Result<OpenedDevice, soapysdr:
 fn find_supported_device(filter_args: soapysdr::Args) -> Result<OpenedDevice, soapysdr::Error> {
     for dev_args in soapycheck!("Enumerate SoapySDR devices", soapysdr::enumerate(filter_args)) {
         //tracing::info!("Trying to open a device with arguments: {}", args_formatted);
-        match open_given_device(dev_args) {
-            Ok(opened_device) => return Ok(opened_device),
-            Err(_) => {}
+        if let Ok(opened_device) = open_given_device(dev_args) {
+            return Ok(opened_device);
         }
     }
-    return Err(soapysdr::Error {
+    Err(soapysdr::Error {
         code: soapysdr::ErrorCode::NotSupported,
         message: "No supported devices found".to_string(),
-    });
+    })
 }
 
 /// Open a given device if argument string is given,
@@ -479,7 +475,7 @@ fn open_device(soapy_cfg: &CfgSoapySdr, mode: StackMode) -> Result<(soapysdr::De
         find_supported_device(soapysdr::Args::new())
     }?;
 
-    let mut sdr_settings = match SdrSettings::get_settings(&soapy_cfg, opened_device.detected_device, mode) {
+    let mut sdr_settings = match SdrSettings::get_settings(soapy_cfg, opened_device.detected_device, mode) {
         Ok(sdr_settings) => sdr_settings,
         Err(soapy_settings::Error::InvalidConfiguration) => {
             return Err(soapysdr::Error {
@@ -498,7 +494,7 @@ fn open_device(soapy_cfg: &CfgSoapySdr, mode: StackMode) -> Result<(soapysdr::De
     tracing::info!("Using settings: {:?}", sdr_settings);
 
     // If additional driver arguments are needed, reopen the device with them
-    if sdr_settings.dev_args.len() > 0 {
+    if !sdr_settings.dev_args.is_empty() {
         // Append additional arguments from settings
         for (key, value) in &sdr_settings.dev_args {
             opened_device.dev_args.set(key.as_str(), value.as_str());

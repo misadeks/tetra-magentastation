@@ -323,7 +323,7 @@ impl MacResource {
     pub fn update_len_and_fill_ind(&mut self, sdu_len: usize) -> usize {
         let hdr_len = self.compute_header_len();
         let total_len = hdr_len + sdu_len;
-        let total_len_bytes = (total_len + 7) / 8;
+        let total_len_bytes = total_len.div_ceil(8);
         let num_fill_bits = (8 - (total_len % 8)) % 8;
 
         self.length_ind = total_len_bytes as u8;

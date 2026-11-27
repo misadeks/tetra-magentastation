@@ -161,8 +161,8 @@ impl QuicTransport {
         // Set ALPN protocol for QUIC
         crypto.alpn_protocols = vec![b"hq-29".to_vec()];
 
-        Ok(quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to build QUIC config: {}", e)))?)
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to build QUIC config: {}", e)))
     }
 
     /// Configure insecure client (skip certificate verification - testing only)

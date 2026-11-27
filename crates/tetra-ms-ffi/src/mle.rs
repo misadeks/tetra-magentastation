@@ -190,6 +190,7 @@ fn code(error: MleError) -> i32 {
     match error {
         MleError::TruncatedPdu => TRUNCATED,
         MleError::InvalidProtocol(value) => INVALID_PROTOCOL_BASE - i32::from(value),
+        MleError::UnsupportedProtocol(_) => UNSUPPORTED, // Existing ABI code; no new layout or discriminant.
         MleError::UnsupportedMlePdu(value) => UNSUPPORTED_PDU_BASE - i32::from(value),
         MleError::UnsupportedManagement => UNSUPPORTED_MANAGEMENT,
         MleError::CapacityExceeded => CAPACITY,
@@ -1050,7 +1051,7 @@ mod tests {
             input.pdu_bits = 2686;
             assert_eq!(session.push(&input), CAPACITY);
         }
-        for protocol in [1, 2, 4] {
+        for protocol in [1, 2] {
             let input = wire(1, &[(3, protocol), (5, 0x12)]);
             assert_eq!(session.push(&input), OK);
             let action = session.poll();
@@ -1068,6 +1069,17 @@ mod tests {
         assert_eq!((action.kind, action.pdu_bits), (11, 4093));
         assert_eq!(action.pdu[511] & 7, 0);
         assert_eq!(session.status().queued_actions, 0);
+    }
+
+    #[test]
+    fn unsupported_sndcp_uses_existing_error_code_without_output_or_state_changes() {
+        let mut session = Session::new(&config());
+        for bits in 0..32 {
+            let input = wire(1, &[(3, 4), (bits, 0)]);
+            assert_eq!(session.push(&input), UNSUPPORTED);
+            assert_eq!(session.status().queued_actions, 0);
+            assert_eq!(session.status().flags, 0);
+        }
     }
 
     #[test]

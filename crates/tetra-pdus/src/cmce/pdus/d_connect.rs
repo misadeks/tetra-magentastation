@@ -202,11 +202,11 @@ mod tests {
         let d_connect = result.unwrap();
         assert_eq!(d_connect.call_identifier, 4);
         assert_eq!(d_connect.call_time_out, CallTimeout::T5m);
-        assert_eq!(d_connect.hook_method_selection, false);
-        assert_eq!(d_connect.simplex_duplex_selection, false);
+        assert!(!d_connect.hook_method_selection);
+        assert!(!d_connect.simplex_duplex_selection);
         assert_eq!(d_connect.transmission_grant, TransmissionGrant::Granted);
-        assert_eq!(d_connect.transmission_request_permission, false);
-        assert_eq!(d_connect.call_ownership, false);
+        assert!(!d_connect.transmission_request_permission);
+        assert!(!d_connect.call_ownership);
         assert!(d_connect.call_priority.is_none());
         assert!(d_connect.basic_service_information.is_none());
         assert!(d_connect.temporary_address.is_none());

@@ -133,9 +133,9 @@ impl MacAccess {
             assert!(!(self.length_ind.is_some() && self.frag_flag.is_some() && self.reservation_req.is_some()));
 
             buf.write_bits(1, 1); // optional field flag
-            if self.length_ind.is_some() {
+            if let Some(length_ind) = self.length_ind {
                 buf.write_bits(0, 1); // length_ind_or_cap_req
-                buf.write_bits(self.length_ind.unwrap() as u64, 5);
+                buf.write_bits(length_ind as u64, 5);
             } else {
                 buf.write_bits(1, 1); // length_ind_or_cap_req
                 buf.write_bits(self.frag_flag.unwrap() as u64, 1);

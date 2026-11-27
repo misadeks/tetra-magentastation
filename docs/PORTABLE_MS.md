@@ -27,7 +27,7 @@ magentastation -> tetra-entities -> tetra-ms-core -> tetra-ms-types
                    +-> tetra-core, tetra-saps, tetra-config
 
 tetra-saps   -> tetra-core
-tetra-config -> tetra-core
+tetra-config -> tetra-core, tetra-ms-core [shared MM configuration bounds]
 tetra-core   -> tetra-ms-types [desktop-codecs]
 ```
 
@@ -79,7 +79,10 @@ actions own bounded packed buffers. Views are MSB-first with checked fixed-width
 offsets, not host-endian casts.
 
 Supply recovered, ordered TDMA time. There is no implicit clock or sleep.
-MM ticks carry elapsed slots and detach disposition. MAC entropy requests
+MM ticks carry elapsed slots and detach disposition. MM attachment actions
+preserve acknowledged class/lifetime metadata in typed `GroupAttachments`
+without enlarging the component. ABI v1 MM lists remain GSSI-only.
+MAC entropy requests
 describe the required draw; the adapter supplies `RaChoices`. No RNG callback
 enters the core. MLE policy slices are borrowed only during `handle`;
 scan/survey carrier lists are bounded snapshots.
@@ -276,7 +279,7 @@ interrupts, and remeasure for your compiler/settings. Large C storage/status
 objects should not be automatic variables on a small task stack.
 
 The all-component freestanding smoke link with Clang/LLD has measured
-148266 bytes text, zero data and 48496 bytes BSS with no undefined symbols.
+149634 bytes text, zero data and 48496 bytes BSS with no undefined symbols.
 It is a link fixture, not bootable firmware; some caller objects are automatic,
 so BSS is not its whole RAM budget.
 
@@ -309,7 +312,10 @@ device. Windows child-process tests also need its DLL directory on `PATH`:
 ```sh
 cargo test --workspace --locked
 cargo test -p magentastation --test offline_ms
+cargo test -p magentastation --release --test offline_ms
 cargo test -p tetra-entities --test test_offline_router
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
 After building the standalone archive, a freestanding C link can be checked

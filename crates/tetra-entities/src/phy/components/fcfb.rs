@@ -85,7 +85,7 @@ fn required_fft_size_factor(overlap: Overlap) -> usize {
 /// For now it panics but the code could be changed to return errors too.
 fn check_fft_size(fft_size: usize, overlap: Overlap) {
     let required = required_fft_size_factor(overlap);
-    if fft_size % required != 0 {
+    if !fft_size.is_multiple_of(required) {
         panic!("FFT size must be a multiple of {}. {} is not.", required, fft_size);
     }
 }
@@ -194,7 +194,7 @@ impl AnalysisInputProcessor {
     ///
     /// block_count should increment by 1 for each processing block.
     /// It is used to implement blockwise phase rotation
-    /// (see https://ieeexplore.ieee.org/document/6834830).
+    /// (see <https://ieeexplore.ieee.org/document/6834830>).
     /// Passing it as a parameter allows input blocks to be skipped
     /// (for example, due to missing samples from a receiver)
     /// while keeping correct phase relationship between blocks.
@@ -584,7 +584,7 @@ pub fn raised_cosine_weights(ifft_size: usize, passband_bins: usize, transition_
     // but currently supported overlap factors needs an even IFFT size anyway.
     // Maybe returning an error instead of panicing with invalid values
     // would be better though.
-    assert!(ifft_size % 2 == 0);
+    assert!(ifft_size.is_multiple_of(2));
 
     let passband_half = passband_bins / 2 + 1;
 

@@ -1,6 +1,6 @@
 use tetra_ms_core::mm::{
-    Action, CellId, Config, DETACH_DRAIN_SLOTS, Error, Event, GroupOperation, GroupRequest, MAX_GROUPS, MAX_REGISTRATION_ATTEMPTS, MmCore,
-    RegState, T351_TIMEOUT_SLOTS, T353_TIMEOUT_SLOTS, TransferState,
+    Action, CellId, Config, DETACH_DRAIN_SLOTS, Error, Event, GroupAttachment, GroupAttachments, GroupOperation, GroupRequest, MAX_GROUPS,
+    MAX_REGISTRATION_ATTEMPTS, MmCore, RegState, T351_TIMEOUT_SLOTS, T353_TIMEOUT_SLOTS, TransferState,
 };
 use tetra_ms_types::bits::{BitView, PackedBits};
 
@@ -122,12 +122,21 @@ fn tick(core: &mut MmCore, transfer: TransferState) {
 }
 
 fn group_ack(attached: &[u32], detached: &[u32]) -> PackedBits {
+    group_ack_metadata(attached, detached, 0, 0)
+}
+
+fn group_ack_metadata(attached: &[u32], detached: &[u32], class: u8, lifetime: u8) -> PackedBits {
     let mut payload = PackedBits::new();
     payload.push(6, (attached.len() + detached.len()) as u32).unwrap();
     for (groups, detachment) in [(attached, false), (detached, true)] {
         for &gssi in groups {
             payload.push(1, u32::from(detachment)).unwrap();
-            payload.push(if detachment { 2 } else { 5 }, 0).unwrap();
+            if detachment {
+                payload.push(2, 0).unwrap();
+            } else {
+                payload.push(2, u32::from(lifetime)).unwrap();
+                payload.push(3, u32::from(class)).unwrap();
+            }
             payload.push(2, 0).unwrap();
             payload.push(24, gssi).unwrap();
         }
@@ -139,6 +148,75 @@ fn group_ack(attached: &[u32], detached: &[u32]) -> PackedBits {
     result.append(payload.view()).unwrap();
     result.push(1, 0).unwrap();
     result
+}
+
+#[test]
+fn acknowledged_metadata_survives_native_registration_and_group_actions_without_identity_leaks() {
+    for class in 0..8 {
+        for lifetime in 0..4 {
+            let ack = group_ack_metadata(&[0xff_ffff], &[], class, lifetime);
+            let mut location_groups = bits("001");
+            location_groups.append(ack.view().window(7, ack.len() - 8).unwrap()).unwrap();
+            location_groups.push(1, 0).unwrap();
+            let mut accept = bits("01010111");
+            accept.push(5, 0).unwrap();
+            accept.push(1, 1).unwrap();
+            accept.push(4, 5).unwrap();
+            accept.push(11, u32::from(location_groups.len())).unwrap();
+            accept.append(location_groups.view()).unwrap();
+            accept.push(1, 0).unwrap();
+            let mut engine = core(&[]);
+            activate(&mut engine);
+            drain(&mut engine);
+            engine.handle(Event::Downlink(accept.view())).unwrap();
+            let actions = drain(&mut engine);
+            let attached = actions
+                .iter()
+                .find_map(|action| match action {
+                    Action::RegistrationSuccess { attached } => Some(attached),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                attached.iter().collect::<Vec<_>>(),
+                [GroupAttachment::new(0xff_ffff, class, lifetime).unwrap()]
+            );
+            assert_eq!(engine.state().attached_gssis.as_slice(), [0xff_ffff]);
+            engine.handle(Event::Downlink(ack.view())).unwrap();
+            let actions = drain(&mut engine);
+            let attached = actions
+                .iter()
+                .find_map(|action| match action {
+                    Action::GroupConfirm { attached, .. } => Some(attached),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                attached.iter().collect::<Vec<_>>(),
+                [GroupAttachment::new(0xff_ffff, class, lifetime).unwrap()]
+            );
+            assert_eq!(engine.state().attached_gssis.as_slice(), [0xff_ffff]);
+        }
+    }
+    for invalid in [
+        GroupAttachment {
+            gssi: 0x100_0000,
+            class_of_usage: 0,
+            lifetime: 0,
+        },
+        GroupAttachment {
+            gssi: 1,
+            class_of_usage: 8,
+            lifetime: 0,
+        },
+        GroupAttachment {
+            gssi: 1,
+            class_of_usage: 0,
+            lifetime: 4,
+        },
+    ] {
+        assert!(GroupAttachments::from_slice(&[invalid]).is_err());
+    }
 }
 
 #[test]
@@ -413,7 +491,7 @@ fn maximum_group_ack_borrows_a_non_aligned_window_without_retaining_input() {
     let Action::GroupConfirm { attached, .. } = &actions[1] else {
         panic!()
     };
-    assert_eq!(attached.as_slice(), groups);
+    assert_eq!(attached.iter().map(|group| group.gssi).collect::<Vec<_>>(), groups);
 }
 
 #[test]
@@ -438,7 +516,7 @@ fn group_confirm_preserves_wire_order_but_filter_is_sorted_and_unique() {
     let Action::GroupConfirm { attached, .. } = &actions[1] else {
         panic!()
     };
-    assert_eq!(attached.as_slice(), [900, 300, 900]);
+    assert_eq!(attached.iter().map(|group| group.gssi).collect::<Vec<_>>(), [900, 300, 900]);
     assert_eq!(engine.state().attached_gssis.as_slice(), [300, 900]);
 }
 

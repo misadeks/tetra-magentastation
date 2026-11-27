@@ -278,6 +278,16 @@ fn routing_and_uplink_headers_are_bit_exact_for_all_bit_alignments() {
             sdu.push(len as u8, if len == 0 { 0 } else { u32::MAX >> (32 - len) }).unwrap();
             let expected = PackedBits::from_view(sdu.view().window(3, len).unwrap()).unwrap();
             let mut core = MleCore::new();
+            if protocol == Protocol::Sndcp {
+                let before = core.state();
+                assert_eq!(
+                    core.handle(config(), MleEvent::Downlink(sdu.view())),
+                    Err(MleError::UnsupportedProtocol(protocol))
+                );
+                assert_eq!(core.state(), before);
+                assert!(drain(&mut core).is_empty());
+                continue;
+            }
             assert_eq!(
                 event(&mut core, MleEvent::Downlink(sdu.view())),
                 [MleAction::Deliver {
@@ -286,9 +296,6 @@ fn routing_and_uplink_headers_are_bit_exact_for_all_bit_alignments() {
                     sdu: FragmentBits::from_view(expected.view()).unwrap(),
                 }]
             );
-            if protocol == Protocol::Sndcp {
-                continue;
-            }
             let source = if protocol == Protocol::Mm {
                 UplinkSource::Mm {
                     priority: Some(7),

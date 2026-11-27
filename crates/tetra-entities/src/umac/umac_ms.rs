@@ -1,8 +1,12 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::panic;
 pub use tetra_ms_core::mac::wire::FragEndKind;
-use tetra_ms_core::mac::{self, Allocation, AllocationType, Channel, FragmentAction, Grant, GrantCapacity, ReservedAction};
+use tetra_ms_core::mac::{self, Channel, FragmentAction, ReservedAction};
+#[cfg(test)]
+use tetra_ms_core::mac::{Allocation, AllocationType, Grant, GrantCapacity};
 use tetra_ms_core::types::{BitError, BitStorage};
 
 use tetra_config::magentastation::{SharedConfig, StackMode};
@@ -15,28 +19,36 @@ use tetra_saps::tmv::TmvConfigureReq;
 use tetra_saps::tmv::TmvTuneReq;
 use tetra_saps::tmv::TmvTxTuneReq;
 use tetra_saps::tmv::enums::logical_chans::LogicalChannel;
-use tetra_saps::tmv::{TmvUnitdataReq, TmvUnitdataReqSlot};
+use tetra_saps::tmv::{TmvUnitdataReq, TmvUnitdataReqSlot, TxBurstPlacement};
 use tetra_saps::{SapMsg, SapMsgInner};
 
+#[cfg(test)]
 use tetra_pdus::umac::enums::basic_slotgrant_cap_alloc::BasicSlotgrantCapAlloc;
+#[cfg(test)]
 use tetra_pdus::umac::enums::basic_slotgrant_granting_delay::BasicSlotgrantGrantingDelay;
+#[cfg(test)]
 use tetra_pdus::umac::fields::basic_slotgrant::BasicSlotgrant;
+#[cfg(test)]
 use tetra_pdus::umac::fields::channel_allocation::ChanAllocElement;
+#[cfg(test)]
 use tetra_pdus::umac::pdus::access_assign::AccessAssign;
 use tetra_pdus::umac::pdus::access_define::AccessDefine;
+#[cfg(test)]
 use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
+#[cfg(test)]
 use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
 
 use crate::umac::subcomp::ms_defrag::MsDefrag;
-use crate::umac::subcomp::ms_random_access::{
-    AccessCode, AccessParamStore, MsRandomAccess, RaAction, Subslot, ThreadRaRng, interpret_access_assign,
-};
+#[cfg(test)]
+use crate::umac::subcomp::ms_random_access::interpret_access_assign;
+use crate::umac::subcomp::ms_random_access::{AccessCode, AccessParamStore, MsRandomAccess, RaAction, Subslot, ThreadRaRng};
 use crate::{MessagePrio, MessageQueue, TetraEntityTrait};
 
 #[cfg(test)]
 const SCH_HU_TYPE1_BITS: usize = mac::wire::SCH_HU_BITS as usize;
 #[cfg(test)]
 const SCH_F_TYPE1_BITS: usize = mac::wire::SCH_F_BITS as usize;
+#[cfg(test)]
 const MAX_UL_FRAG_SLOTS: usize = mac::wire::MAX_UL_FRAG_SLOTS;
 #[cfg(test)]
 const BROADCAST_SSI: u32 = 0xFF_FFFF;
@@ -98,7 +110,7 @@ type ReservedTxPlan = mac::ReservedTxPlan<u32>;
 /// LLC, however, may hand down several TM-SDUs in quick succession — e.g. an
 /// unacknowledged BL-ACK auto-ack interleaved with an acknowledged group-attach
 /// — so extra transfers are held here in FIFO order and promoted into the
-/// active slots by [`UmacMs::promote_next_uplink`] once the current one
+/// active slots by [`mac::MsMac::promote`] once the current one
 /// completes. This prevents a later uplink from overwriting an in-flight
 /// transfer and orphaning its [`PendingUplink::tx_reporter`], which would leave
 /// the acknowledged basic link wedged (no `t_umac_done`, so the LLC T251/N252
@@ -110,6 +122,7 @@ type QueuedUplink = mac::QueuedUplink<u32>;
 /// few auto-acks). The cap is a defensive guard against pathological growth; on
 /// overflow the oldest queued transfer is dropped with its receipt marked
 /// discarded so the LLC retransmits it rather than leaking memory.
+#[cfg(test)]
 const MAX_UPLINK_QUEUE: usize = mac::MAX_UPLINK_QUEUE;
 const MAX_TX_REPORTERS: usize = mac::MAX_UPLINK_QUEUE + mac::MAX_STOLEN_SIGNALLING + 2;
 
@@ -882,6 +895,7 @@ impl UmacMs {
     /// Advance the random access state machine (cl. 23.5.1.4) for one downlink
     /// slot's ACCESS-ASSIGN and act on the resulting decision. No-op unless a
     /// random access attempt is currently in progress.
+    #[cfg(test)]
     fn drive_random_access(&mut self, queue: &mut MessageQueue, aa: &AccessAssign) {
         let assign = interpret_access_assign(aa, true);
         self.drive_random_access_assign(queue, &assign);
@@ -964,8 +978,6 @@ impl UmacMs {
             scrambling_code: pending.scrambling_code,
         };
 
-        // NOTE: the chosen subslot is not yet conveyed to LMAC/PHY (TmvUnitdataReqSlot
-        // has slot-level `ts` only). Phase 3d adds subslot keying in PhyMs.
         let m = SapMsg {
             sap: Sap::TmvSap,
             src: self.self_component,
@@ -973,23 +985,18 @@ impl UmacMs {
             msg: SapMsgInner::TmvUnitdataReq(TmvUnitdataReqSlot {
                 ts: ul_time,
                 ul_phy_chan: PhysicalChannel::Cp,
+                placement: match subslot {
+                    Subslot::One => TxBurstPlacement::Subslot1,
+                    Subslot::Two => TxBurstPlacement::Subslot2,
+                },
                 blk1: Some(blk),
                 blk2: None,
                 bbk: None,
-                // Random-access contention burst: a later occurrence of the
-                // same opportunity is equivalent, so the PHY may frame-advance
-                // it to stay ahead of the TX frontier.
+                // Contention access uses the exact selected opportunity.
                 reserved_access: false,
             }),
         };
         queue.push_back(m);
-    }
-
-    /// Mark a fragmented transfer's transmit receipt discarded so the LLC
-    /// acknowledged basic link retransmits the whole SDU (cl. 22.3.2.3). Used on
-    /// every path where the fragment end cannot be emitted.
-    fn discard_fragment(&mut self, frag: &UplinkFragment) {
-        self.finish_receipt(frag.tx_reporter, false);
     }
 
     /// Emit the fragment-end PDU that completes a fragmented uplink transfer, on
@@ -1018,6 +1025,7 @@ impl UmacMs {
     /// in the same TDMA frame as the downlink slot carrying the grant; since the
     /// uplink frame is a fixed 2-timeslot delay from the downlink (cl. 9.3.9
     /// Frame alignment), that is `dltime + 2`.
+    #[cfg(test)]
     fn emit_fragment_end(&mut self, queue: &mut MessageQueue, grant: Option<&BasicSlotgrant>) {
         let grant = grant.map(|grant| Grant {
             next_opportunity: grant.granting_delay == BasicSlotgrantGrantingDelay::CapAllocAtNextOpportunity,
@@ -1030,6 +1038,7 @@ impl UmacMs {
         self.emit_fragment_end_core(queue, grant);
     }
 
+    #[cfg(test)]
     fn emit_fragment_end_core(&mut self, queue: &mut MessageQueue, grant: Option<Grant>) {
         if let Some(action) = self.mac.grant_fragment(grant) {
             self.apply_fragment_action(queue, action);
@@ -1060,6 +1069,10 @@ impl UmacMs {
             msg: SapMsgInner::TmvUnitdataReq(TmvUnitdataReqSlot {
                 ts: burst.time,
                 ul_phy_chan: PhysicalChannel::Cp,
+                placement: match burst.channel {
+                    Channel::SchHu => TxBurstPlacement::Subslot1,
+                    _ => TxBurstPlacement::FullSlot,
+                },
                 blk1: Some(block),
                 blk2: None,
                 bbk: None,
@@ -1125,6 +1138,7 @@ impl UmacMs {
     /// When both hold (talking and a signalling PDU is queued) the slot is
     /// stolen: the STCH signalling block takes the first half and the TCH/S
     /// speech the second (normal training sequence 2, cl. 9.4.4.3.2).
+    #[cfg(test)]
     fn drive_uplink_traffic(&mut self, queue: &mut MessageQueue) {
         let Some(burst) = self.mac.traffic() else {
             return;
@@ -1178,6 +1192,7 @@ impl UmacMs {
                 // Traffic physical channel carries the TCH/S burst (cl. 9.4.4.2),
                 // matching the BS which uses Tp for traffic and Cp otherwise.
                 ul_phy_chan: PhysicalChannel::Tp,
+                placement: TxBurstPlacement::FullSlot,
                 blk1: Some(blk1),
                 blk2,
                 bbk: None,
@@ -1334,52 +1349,15 @@ impl UmacMs {
         }
     }
 
-    /// Whether an uplink transfer is currently occupying the single random-access
-    /// / reserved-transmission slot the MS-MAC allows (cl. 23.5.1.4 / 23.4.2.1.2).
-    /// A new transfer must not start (or overwrite) while any of these hold, or
-    /// its `tx_reporter` would be orphaned and the acknowledged basic link would
-    /// wedge. Covers a queued/contending MAC-ACCESS (`pending_uplink`), an
-    /// outstanding fragment remainder awaiting its grant (`pending_fragment`), an
-    /// active random-access attempt, and an in-flight multi-slot reserved transfer
-    /// (`reserved_tx`).
-    fn uplink_in_flight(&self) -> bool {
-        self.mac.uplink_in_flight(self.random_access.is_active())
-    }
-
     /// Promote the next queued uplink transfer (if any) into the active
     /// `pending_uplink`/`pending_fragment` slots, but only when nothing is
     /// currently contending for random access. Called each downlink slot from
     /// `drive_random_access`, this is what lets a transfer queued behind another
     /// (e.g. a group-attach behind an LLC BL-ACK) start once the earlier one has
     /// been acknowledged or abandoned.
+    #[cfg(test)]
     fn promote_next_uplink(&mut self) {
         self.mac.promote(self.random_access.is_active());
-    }
-
-    /// Build a MAC-ACCESS type-1 MAC block (ETSI TS 100 392-2 cl. 21.4.2.1)
-    /// carrying `sdu` for transmission on SCH/HU (Control Uplink Burst). The
-    /// block is addressed with the MS's own ISSI (the uplink MAC-ACCESS address
-    /// is always an ISSI, cl. 21.4.2.1). Returns the full 92-bit type-1 block
-    /// (MAC-ACCESS header + TM-SDU + fill bits), or `None` if the SDU does not
-    /// fit a single access burst (uplink fragmentation, cl. 23.4.2.1, not yet
-    /// implemented).
-    ///
-    /// The PDU carries **no length indication**: per cl. 21.4.2.1 the length
-    /// indication field "should be used only if association within the uplink
-    /// subslot is required or for transmission of the null PDU", neither of
-    /// which applies to a self-contained random-access signalling burst. With
-    /// the optional field flag left at 0, the MAC-ACCESS implicitly spans the
-    /// whole MAC block and the remaining capacity is completed with fill bits
-    /// (cl. 23.4.2.2: a bit "1" immediately after the TM-SDU followed by bits
-    /// "0" to the end of the MAC block). The receiver (cl. 23.4.3.2) treats the
-    /// PDU as filling the block and strips the trailing fill bits, so the
-    /// padding is never mis-decoded as a spurious second concatenated MAC PDU.
-    /// True when the network has assigned this MS at least one uplink traffic
-    /// slot via a same-carrier CHANNEL ALLOCATION element (cl. 21.5.2). Gates
-    /// FACCH/STCH stealing: without a granted traffic channel there is nothing to
-    /// steal, so associated signalling must go over the MCCH instead.
-    fn has_assigned_traffic_slot(&self) -> bool {
-        self.mac.has_assigned_traffic_slot()
     }
 
     /// Build a 124-bit STCH type-1 MAC block wrapping `sdu` (an LLC BL-DATA PDU)
@@ -1392,6 +1370,7 @@ impl UmacMs {
     /// sub-octet fill (cl. 23.4.2.2); bits beyond `length_ind` octets are ignored
     /// by the receiver. Returns `None` if the PDU does not fit a single STCH
     /// half-slot, in which case the caller falls back to MCCH random access.
+    #[cfg(test)]
     fn build_stch_mac_data_block(issi: u32, sdu: &mut BitBuffer) -> Option<BitBuffer> {
         let bits = pack::<512>(sdu).ok()?;
         let block = mac::wire::stolen_data(issi, bits.view()).ok()?;
@@ -1399,6 +1378,11 @@ impl UmacMs {
         Some(unpack(&block))
     }
 
+    /// Build a 92-bit MAC-ACCESS type-1 block addressed with the MS's ISSI
+    /// (ETSI TS 100 392-2 cl. 21.4.2.1). Returns `None` if the SDU needs
+    /// fragmentation. No length indication is used: a self-contained PDU
+    /// fills the subslot, with a one-bit delimiter then zero fill after the SDU
+    /// (cl. 23.4.2.2 / 23.4.3.2).
     pub fn build_mac_access_block(issi: u32, sdu: &mut BitBuffer) -> Option<BitBuffer> {
         let bits = pack::<512>(sdu).ok()?;
         let block = mac::wire::access(issi, bits.view()).ok()?;
@@ -1406,16 +1390,10 @@ impl UmacMs {
         Some(unpack(&block))
     }
 
-    /// Largest TM-SDU remainder (in bits) that a single MAC-END-HU can carry on
-    /// an SCH/HU subslot: header + SDU + fill must be a whole number of octets
-    /// not exceeding the 92-bit block (cl. 21.4.2.2 / 23.4.2.2).
-    const fn max_end_hu_sdu_bits() -> usize {
-        mac::wire::END_HU_SDU_BITS as usize
-    }
-
     /// Largest TM-SDU remainder (in bits) that a single MAC-END-UL can carry on
     /// an SCH/F full slot: header + SDU + fill must be a whole number of octets
     /// not exceeding the 268-bit block (cl. 21.4.2.5 / 23.4.2.2).
+    #[cfg(test)]
     const fn max_end_ul_sdu_bits() -> usize {
         mac::wire::END_UL_SDU_BITS as usize
     }
@@ -1424,6 +1402,7 @@ impl UmacMs {
     /// 268-bit SCH/F block minus the 4-bit header (cl. 21.4.2.4). A continuation
     /// fills its slot exactly (no fill bits, no length indication — the length
     /// is carried by the terminating MAC-END-UL).
+    #[cfg(test)]
     const fn max_frag_ul_sdu_bits() -> usize {
         mac::wire::FRAG_UL_SDU_BITS as usize
     }
@@ -1435,13 +1414,14 @@ impl UmacMs {
     /// Returns `None` if the remainder needs more than [`MAX_UL_FRAG_SLOTS`]
     /// slots. The caller only reaches this for a remainder that does not fit a
     /// single MAC-END-UL, so `total_slots >= 2`.
+    #[cfg(test)]
     fn compute_ul_frag_slots(remainder_len: usize) -> Option<usize> {
         mac::wire::fragment_slots(remainder_len.try_into().ok()?).ok().map(usize::from)
     }
 
     /// Build one MAC-FRAG-UL continuation block (ETSI TS 100 392-2 cl. 21.4.2.4)
     /// on a reserved SCH/F full slot: the 4-bit header followed by exactly
-    /// [`Self::max_frag_ul_sdu_bits`] TM-SDU bits, filling the 268-bit block with
+    /// [`mac::wire::FRAG_UL_SDU_BITS`] TM-SDU bits, filling the 268-bit block with
     /// no fill bits and no length indication (the terminating MAC-END-UL carries
     /// the overall length). `sdu_chunk` must hold exactly that many bits.
     pub fn build_mac_frag_ul_block(sdu_chunk: &mut BitBuffer) -> BitBuffer {
@@ -1455,7 +1435,7 @@ impl UmacMs {
     /// blocks: `total_slots - 1` MAC-FRAG-UL continuations followed by a
     /// terminating MAC-END-UL (ETSI TS 100 392-2 cl. 23.4.2.1.2). Returns the
     /// blocks in transmission order, or `None` if the sizing is inconsistent
-    /// (should not happen for a `total_slots` from [`Self::compute_ul_frag_slots`]).
+    /// (should not happen for a `total_slots` from [`mac::wire::fragment_slots`]).
     pub fn build_ul_frag_blocks(remainder: &mut BitBuffer, total_slots: usize) -> Option<Vec<BitBuffer>> {
         let bits = pack::<512>(remainder).ok()?;
         let blocks = mac::wire::FragmentBlocks::build(bits.view(), total_slots.try_into().ok()?).ok()?;
@@ -1470,6 +1450,7 @@ impl UmacMs {
     /// skipping any mandatory CLCH slot — mirroring the BS
     /// `ul_find_grant_opportunity` "capacity allocation at next opportunity"
     /// stepping so the MS reproduces the BS's reserved set exactly.
+    #[cfg(test)]
     fn reserved_slot_sequence(first: TdmaTime, total_slots: usize) -> VecDeque<TdmaTime> {
         mac::reserved_slot_sequence(first, total_slots.try_into().expect("reserved slot count fits u8"))
             .expect("reserved slot count or time invalid")[..total_slots]
@@ -1494,7 +1475,7 @@ impl UmacMs {
     /// with. Returns `None` if the SDU is not actually larger than one fragment
     /// (caller should use the self-contained [`Self::build_mac_access_block`]
     /// path instead), or if the remainder is larger than
-    /// [`MAX_UL_FRAG_SLOTS`] full slots can carry (no realistic signalling SDU
+    /// [`mac::wire::MAX_UL_FRAG_SLOTS`] full slots can carry (no realistic signalling SDU
     /// is that large).
     pub fn build_mac_access_frag_start(issi: u32, sdu: &mut BitBuffer) -> Option<(BitBuffer, BitBuffer, FragEndKind)> {
         let bits = pack::<512>(sdu).ok()?;
@@ -1557,6 +1538,7 @@ impl UmacMs {
     }
 
     /// The MS's own Individual Short Subscriber Identity (ISSI) from config.
+    #[cfg(test)]
     fn own_issi(&self) -> u32 {
         self.config
             .config()
@@ -1712,6 +1694,7 @@ impl UmacMs {
     /// M3 — here it is logged and ignored (no retune, no slot change), so the MS
     /// keeps decoding its current channel rather than acting half-way on an
     /// allocation it cannot yet follow.
+    #[cfg(test)]
     fn act_on_channel_allocation(&mut self, ca: &ChanAllocElement, alloc_ssi: u32) {
         let own = self.own_issi();
         let result = self.mac.allocate(
@@ -2159,6 +2142,26 @@ attach_groups = []
         assert_eq!(blk.mac_block.get_len(), SCH_HU_TYPE1_BITS, "92-bit SCH/HU type-1 block");
     }
 
+    #[test]
+    fn random_access_selected_subslot_reaches_tmv() {
+        for (subslot, placement) in [
+            (Subslot::One, TxBurstPlacement::Subslot1),
+            (Subslot::Two, TxBurstPlacement::Subslot2),
+        ] {
+            let mut umac = umac_with_active_attempt();
+            let mut queue = MessageQueue::new();
+            let time = umac.dltime.add_timeslots(2);
+            umac.emit_uplink(&mut queue, time, subslot);
+            let SapMsgInner::TmvUnitdataReq(slot) = queue.pop_front().unwrap().msg else {
+                panic!("expected TMV uplink");
+            };
+            assert_eq!(slot.placement, placement);
+            assert_eq!(slot.ts, time);
+            assert!(!slot.reserved_access);
+            assert_eq!(slot.blk1.unwrap().logical_channel, LogicalChannel::SchHu);
+        }
+    }
+
     /// 3C-d: a reserved (assigned-only) slot is not a random access opportunity,
     /// so nothing is transmitted and the attempt stays active (cl. 23.5.1.4.2).
     #[test]
@@ -2218,6 +2221,7 @@ attach_groups = []
         };
         assert_eq!(slot.ts, umac.dltime.add_timeslots(2), "MAC-END-HU at DL + 2 timeslots");
         assert!(slot.reserved_access, "MAC-END-HU is a reserved-access burst");
+        assert_eq!(slot.placement, TxBurstPlacement::Subslot1);
         let blk = slot.blk1.expect("blk1 carries the MAC-END-HU");
         assert_eq!(blk.logical_channel, LogicalChannel::SchHu);
         assert_eq!(blk.scrambling_code, 0xABCD_1234);
@@ -3234,6 +3238,8 @@ attach_groups = []
     fn test_ms_uplink_audio_buffer_bounded() {
         let mut umac = ms_umac();
         let mut q = MessageQueue::new();
+        umac.rx_tlmc_prim(&mut q, uplane_cfg(true, true));
+        assert!(umac.uplink_tx_granted);
         for i in 0..(UPLINK_AUDIO_MAX_FRAMES + 3) {
             umac.rx_tmd_prim(&mut q, tmd_source(vec![i as u8; 35]));
         }
@@ -3242,6 +3248,7 @@ attach_groups = []
             UPLINK_AUDIO_MAX_FRAMES,
             "buffer capped, oldest frames dropped"
         );
+        assert_eq!(umac.uplink_audio.pop_front().unwrap().view().read(0, 8), Ok(3));
     }
 
     /// A buffered (non-silence) source frame is clocked out on the granted slot:

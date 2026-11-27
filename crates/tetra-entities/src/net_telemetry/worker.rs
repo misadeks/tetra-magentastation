@@ -99,10 +99,8 @@ impl<T: NetworkTransport> TelemetryWorker<T> {
 
     fn forward_event(&mut self, event: &TelemetryEvent) {
         if !self.connected {
-            self.try_connect();
-            if !self.connected {
-                return;
-            }
+            tracing::debug!("Telemetry event not delivered: transport disconnected");
+            return;
         }
 
         let codec = TelemetryCodecJson;
@@ -110,7 +108,6 @@ impl<T: NetworkTransport> TelemetryWorker<T> {
         if let Err(e) = self.transport.send_reliable(&payload) {
             tracing::warn!("Telemetry transport send failed: {}, will reconnect", e);
             self.connected = false;
-            self.try_connect();
         }
     }
 
@@ -140,7 +137,6 @@ impl<T: NetworkTransport> TelemetryWorker<T> {
     }
 
     fn try_connect(&mut self) {
-        self.last_connect_attempt = Some(Instant::now());
         match self.transport.connect() {
             Ok(()) => {
                 tracing::info!("Telemetry transport connected");
@@ -163,6 +159,7 @@ impl<T: NetworkTransport> TelemetryWorker<T> {
                 self.connected = false;
             }
         }
+        self.last_connect_attempt = Some(Instant::now());
     }
 }
 
@@ -199,6 +196,20 @@ mod tests {
 
         drop(sink);
         handle.join().expect("telemetry worker panicked");
+    }
+
+    #[test]
+    fn slow_failed_connection_does_not_repeat_while_draining_closed_source() {
+        let (sink, source) = telemetry_channel();
+        for issi in 0..8 {
+            sink.send(TelemetryEvent::MsRegistration { issi });
+        }
+        drop(sink);
+        let mut worker = TelemetryWorker::new(source, MockTransport::failing_connect(RECONNECT_DELAY + Duration::from_millis(50)));
+        let started = Instant::now();
+        worker.run();
+        assert_eq!(worker.transport.connect_attempts(), 1);
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     /// Integration test: spins up a TelemetryWorker with a real WebSocketTransport

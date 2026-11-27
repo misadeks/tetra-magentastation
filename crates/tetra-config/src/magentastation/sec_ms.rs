@@ -5,14 +5,13 @@ use toml::Value;
 /// Mobile Station (MS) specific configuration.
 ///
 /// Only relevant when `stack_mode = "Ms"`. The MS reuses `net_info` (home MCC/MNC)
-/// and `cell_info` (RF tuning: band/carrier/duplex) for radio configuration; this
+/// and optional legacy `cell_info` seed values for radio configuration; this
 /// section holds the MS identity and affiliation.
 ///
 /// Note: MS transmit parameters (class of MS / power class, ref. EN 300 392-2
 /// clause 6 and the class-of-MS element in clause 16) are intentionally not
-/// modelled yet. They are only needed once uplink transmission and registration
-/// are implemented (plan phases 3-4) and will be added against the exact PDU
-/// field definitions at that point.
+/// modelled here. Uplink transmission and registration use the stack's existing
+/// protocol defaults rather than exposing these fields as configuration.
 #[derive(Debug, Clone)]
 pub struct CfgMs {
     /// Own Individual Short Subscriber Identity (ISSI), 24 bits. The MS address.

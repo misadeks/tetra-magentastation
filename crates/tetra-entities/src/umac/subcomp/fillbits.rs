@@ -44,10 +44,10 @@ pub mod addition {
         let bytealigned_fill_bits = compute_required_bytealigned(total_pdu_sdu_len_bits);
         if total_pdu_sdu_len_bits + bytealigned_fill_bits <= dest_cap_left {
             // Simple case; we align to next byte boundary without overflowing the slot
-            return bytealigned_fill_bits;
+            bytealigned_fill_bits
         } else {
             // Adding bytealigned_fill_bits would overflow the slot, so we fill to the end of the slot instead
-            return dest_cap_left - total_pdu_sdu_len_bits;
+            dest_cap_left - total_pdu_sdu_len_bits
         }
     }
 

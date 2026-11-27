@@ -308,6 +308,23 @@ impl CmceCore {
         let call = self.calls.get_mut(&id).ok_or(CmceError::UnknownCall)?;
         if let Some(state) = call.protocol.apply_grant(self.own_issi, grant, speaker)? {
             self.configure(id, state)?;
+        } else {
+            self.revoke_stale_tx(id)?;
+        }
+        Ok(())
+    }
+    fn revoke_stale_tx(&mut self, id: u16) -> Result<(), CmceError> {
+        let call = self.calls.get(&id).ok_or(CmceError::UnknownCall)?;
+        if call.tx_grant_state != MsTxGrantState::GrantedSelf
+            && let Some(previous) = call.last_uplane.filter(|state| state.tx_grant)
+        {
+            self.configure(
+                id,
+                MsUPlaneState {
+                    tx_grant: false,
+                    ..previous
+                },
+            )?;
         }
         Ok(())
     }
@@ -539,6 +556,12 @@ impl CmceCore {
         })?;
         let call = self.calls.get_mut(&id).ok_or(CmceError::UnknownCall)?;
         let state = call.clear(release, cause);
+        call.tx_grant_state = MsTxGrantState::None;
+        call.pending_tx_request = false;
+        // Clearing consumes the expired setup/call timer. There is no locally
+        // invented retransmission timer: subsequent ticks must not resend.
+        call.timers.setup_phase_deadline = None;
+        call.timers.call_deadline = None;
         let route = call.route;
         self.uplink(sdu, route, false);
         self.configure(id, state)?;
@@ -597,9 +620,9 @@ impl CmceCore {
                 if self.calls.is_full() && !self.calls.contains_key(&id) {
                     return Err(CmceError::Capacity);
                 }
-                let pending = self.pending_originations.pop();
-                let (basic, duplex) = originating_service(p.basic, pending.as_ref(), p.duplex, DEFAULT_BASIC);
                 if !self.calls.contains_key(&id) {
+                    let pending = self.pending_originations.iter().last();
+                    let (basic, duplex) = originating_service(p.basic, pending, p.duplex, DEFAULT_BASIC);
                     self.calls.insert(
                         id,
                         CmceCall::create(
@@ -611,6 +634,7 @@ impl CmceCore {
                             if p.kind == 1 { true } else { !p.permission_denied },
                         )?,
                     )?;
+                    self.pending_originations.pop();
                     self.actions.push(CmceAction::Call {
                         change: CallChange::Created,
                         id,
@@ -659,6 +683,8 @@ impl CmceCore {
                     }
                     if let Some(state) = outcome.configure {
                         self.configure(id, state)?;
+                    } else {
+                        self.revoke_stale_tx(id)?;
                     }
                     let speaker = p.speaker.or_else(|| self.calls.get(&id).and_then(|call| call.current_speaker_ssi));
                     self.notify(

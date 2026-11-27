@@ -4,6 +4,9 @@ use std::time::{Duration, Instant};
 
 use super::{NetworkAddress, NetworkError, NetworkMessage, NetworkTransport};
 
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_FRAMES_PER_POLL: usize = 64;
+
 /// Configuration for creating a TCP transport
 #[derive(Debug, Clone)]
 pub struct TcpTransportConfig {
@@ -41,6 +44,10 @@ pub struct TcpTransport {
     server_addr: NetworkAddress,
     connect_timeout: Duration,
     read_timeout: Duration,
+    rx_header: [u8; 4],
+    rx_header_len: usize,
+    rx_payload: Vec<u8>,
+    rx_payload_len: usize,
 }
 
 impl TcpTransport {
@@ -50,6 +57,10 @@ impl TcpTransport {
             server_addr,
             connect_timeout,
             read_timeout,
+            rx_header: [0; 4],
+            rx_header_len: 0,
+            rx_payload: Vec::new(),
+            rx_payload_len: 0,
         }
     }
 
@@ -71,6 +82,53 @@ impl TcpTransport {
     fn close_connection(&mut self) {
         if let Some(stream) = self.stream.take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        self.rx_header_len = 0;
+        self.rx_payload.clear();
+        self.rx_payload_len = 0;
+    }
+
+    fn read_frame(&mut self) -> Result<Option<NetworkMessage>, NetworkError> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| NetworkError::ReceiveFailed("No active connection".to_string()))?;
+        loop {
+            let buffer = if self.rx_header_len < 4 {
+                &mut self.rx_header[self.rx_header_len..]
+            } else {
+                &mut self.rx_payload[self.rx_payload_len..]
+            };
+            let read = if buffer.is_empty() { Ok(0) } else { stream.read(buffer) };
+            let count = match read {
+                Ok(0) if !buffer.is_empty() => return Err(NetworkError::ReceiveFailed("TCP peer disconnected during frame".to_string())),
+                Ok(count) => count,
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(NetworkError::ReceiveFailed(error.to_string())),
+            };
+            if self.rx_header_len < 4 {
+                self.rx_header_len += count;
+                if self.rx_header_len == 4 {
+                    let len = u32::from_be_bytes(self.rx_header) as usize;
+                    if len > MAX_FRAME_BYTES {
+                        return Err(NetworkError::ReceiveFailed("TCP frame exceeds one MiB".to_string()));
+                    }
+                    self.rx_payload.resize(len, 0);
+                    self.rx_payload_len = 0;
+                }
+            } else {
+                self.rx_payload_len += count;
+            }
+            if self.rx_header_len == 4 && self.rx_payload_len == self.rx_payload.len() {
+                self.rx_header_len = 0;
+                self.rx_payload_len = 0;
+                return Ok(Some(NetworkMessage {
+                    source: self.server_addr.clone(),
+                    payload: std::mem::take(&mut self.rx_payload),
+                    timestamp: Instant::now(),
+                }));
+            }
         }
     }
 
@@ -118,15 +176,22 @@ impl NetworkTransport for TcpTransport {
                 stream
                     .set_read_timeout(Some(self.read_timeout))
                     .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to set timeout: {}", e)))?;
+                stream
+                    .set_write_timeout(Some(self.connect_timeout))
+                    .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to set write timeout: {e}")))?;
 
                 self.stream = Some(stream);
                 Ok(())
             }
+
             Err(e) => Err(NetworkError::ConnectionFailed(format!("TCP connect failed: {}", e))),
         }
     }
 
     fn send_reliable(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
+        if payload.len() > MAX_FRAME_BYTES {
+            return Err(NetworkError::SendFailed("TCP frame exceeds one MiB".to_string()));
+        }
         self.ensure_stream_exists()?;
 
         // Try to send, and retry once after reconnect if the connection was stale
@@ -142,106 +207,142 @@ impl NetworkTransport for TcpTransport {
     }
 
     fn send_unreliable(&mut self, _payload: &[u8]) -> Result<(), NetworkError> {
-        unimplemented!("TCP transport does not support unreliable messaging")
+        Err(NetworkError::SendFailed("TCP has no unreliable channel".to_string()))
     }
 
     fn receive_reliable(&mut self) -> Vec<NetworkMessage> {
         let mut messages = Vec::new();
 
-        if let Some(ref mut stream) = self.stream {
-            tracing::debug!("TCP receive: checking for messages on connection");
-            // Set non-blocking mode for receiving
+        if let Some(stream) = &self.stream {
             if let Err(e) = stream.set_nonblocking(true) {
                 tracing::error!("Failed to set non-blocking mode: {}", e);
+                self.close_connection();
                 return messages;
             }
-
-            loop {
-                // Try to read message length
-                let mut len_bytes = [0u8; 4];
-                match stream.read_exact(&mut len_bytes) {
-                    Ok(()) => {
-                        let payload_len = u32::from_be_bytes(len_bytes) as usize;
-                        tracing::info!("Received message length: {} bytes", payload_len);
-
-                        // Reasonable message size limit
-                        if payload_len > 1024 * 1024 {
-                            tracing::warn!("Message too large: {} bytes", payload_len);
-                            break;
-                        }
-
-                        // Read payload
-                        let mut payload = vec![0u8; payload_len];
-                        match stream.read_exact(&mut payload) {
-                            Ok(()) => {
-                                messages.push(NetworkMessage {
-                                    source: self.server_addr.clone(),
-                                    payload,
-                                    timestamp: Instant::now(),
-                                });
-                            }
-                            Err(_) => break, // Connection closed or error
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // No more data available
-                        tracing::debug!("TCP receive: no data available (would block)");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::debug!("TCP receive: error reading length header: {}", e);
-                        break; // Connection error
-                    }
+        } else {
+            return messages;
+        }
+        for _ in 0..MAX_FRAMES_PER_POLL {
+            match self.read_frame() {
+                Ok(Some(message)) => messages.push(message),
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!("TCP receive failed: {error}");
+                    self.close_connection();
+                    break;
                 }
             }
-
-            // Restore blocking mode
-            let _ = stream.set_nonblocking(false);
+        }
+        if let Some(stream) = &self.stream
+            && let Err(error) = stream.set_nonblocking(false)
+        {
+            tracing::error!("TCP could not restore blocking mode: {error}");
+            self.close_connection();
         }
 
         messages
     }
 
     fn receive_unreliable(&mut self) -> Vec<NetworkMessage> {
-        unimplemented!("TCP transport does not support unreliable messaging")
+        tracing::warn!("TCP has no unreliable channel");
+        Vec::new()
     }
 
     /// Wait for a single response message with blocking read and timeout
     /// Used for request-response patterns where we expect a reply
     fn wait_for_response_reliable(&mut self) -> Result<NetworkMessage, NetworkError> {
-        if let Some(ref mut stream) = self.stream {
+        if let Some(stream) = &self.stream {
             // Ensure blocking mode (should already be set from reconnect)
             stream
                 .set_nonblocking(false)
                 .map_err(|e| NetworkError::ReceiveFailed(format!("Failed to set blocking mode: {}", e)))?;
 
-            // Read message length (blocking with timeout)
-            let mut len_bytes = [0u8; 4];
-            stream
-                .read_exact(&mut len_bytes)
-                .map_err(|e| NetworkError::ReceiveFailed(format!("Failed to read length header: {}", e)))?;
-
-            let payload_len = u32::from_be_bytes(len_bytes) as usize;
-            tracing::info!("Received message length: {} bytes", payload_len);
-
-            // Reasonable message size limit
-            if payload_len > 1024 * 1024 {
-                return Err(NetworkError::ReceiveFailed(format!("Message too large: {} bytes", payload_len)));
+            match self.read_frame() {
+                Ok(Some(message)) => Ok(message),
+                Ok(None) => Err(NetworkError::Timeout),
+                Err(error) => {
+                    self.close_connection();
+                    Err(error)
+                }
             }
-
-            // Read payload (blocking with timeout)
-            let mut payload = vec![0u8; payload_len];
-            stream
-                .read_exact(&mut payload)
-                .map_err(|e| NetworkError::ReceiveFailed(format!("Failed to read payload: {}", e)))?;
-
-            Ok(NetworkMessage {
-                source: self.server_addr.clone(),
-                payload,
-                timestamp: Instant::now(),
-            })
         } else {
             Err(NetworkError::ReceiveFailed("No active connection".to_string()))
+        }
+    }
+
+    fn disconnect(&mut self) {
+        self.close_connection();
+    }
+
+    fn is_connected(&self) -> bool {
+        self.stream.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn pair() -> (TcpTransport, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        let mut transport = TcpTransport::new(
+            NetworkAddress::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: listener.local_addr().unwrap().port(),
+            },
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        transport.stream = Some(stream);
+        (transport, peer)
+    }
+
+    fn poll_until(transport: &mut TcpTransport, expected: usize) -> Vec<NetworkMessage> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut messages = Vec::new();
+        while messages.len() < expected {
+            messages.extend(transport.receive_reliable());
+            assert!(Instant::now() < deadline, "TCP framing timed out");
+            std::thread::yield_now();
+        }
+        messages
+    }
+
+    #[test]
+    fn split_prefix_body_multiple_frames_and_empty_payload() {
+        let (mut transport, mut peer) = pair();
+        let header = 3u32.to_be_bytes();
+        for byte in &header[..3] {
+            peer.write_all(&[*byte]).unwrap();
+            assert!(transport.receive_reliable().is_empty());
+        }
+        peer.write_all(&[header[3], b'a']).unwrap();
+        assert!(transport.receive_reliable().is_empty());
+        peer.write_all(b"bc").unwrap();
+        let messages = poll_until(&mut transport, 1);
+        assert_eq!(messages[0].payload, b"abc");
+        peer.write_all(&[0, 0, 0, 0, 0, 0, 0, 1, b'z']).unwrap();
+        let messages = poll_until(&mut transport, 2);
+        assert!(messages[0].payload.is_empty());
+        assert_eq!(messages[1].payload, b"z");
+    }
+
+    #[test]
+    fn oversized_prefix_and_partial_disconnect_clear_state() {
+        for prefix in [(MAX_FRAME_BYTES as u32 + 1).to_be_bytes().to_vec(), vec![0, 0]] {
+            let (mut transport, mut peer) = pair();
+            peer.write_all(&prefix).unwrap();
+            peer.shutdown(std::net::Shutdown::Both).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while transport.is_connected() {
+                assert!(transport.receive_reliable().is_empty());
+                assert!(Instant::now() < deadline);
+            }
+            assert_eq!(transport.rx_header_len, 0);
+            assert!(transport.rx_payload.is_empty());
         }
     }
 }

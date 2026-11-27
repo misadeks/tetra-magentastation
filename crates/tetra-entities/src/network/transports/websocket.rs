@@ -19,6 +19,53 @@ use super::{NetworkAddress, NetworkError, NetworkMessage, NetworkTransport};
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_MESSAGES_PER_POLL: usize = 64;
+
+/// The handshake has one deadline even if a peer trickles TLS/HTTP bytes.
+struct DeadlineStream {
+    tcp: TcpStream,
+    deadline: Option<Instant>,
+    poll_deadline: Option<Instant>,
+}
+
+impl DeadlineStream {
+    fn remaining(deadline: Instant) -> std::io::Result<Duration> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "connection handshake deadline expired"))
+    }
+
+    fn finish_handshake(&mut self) -> std::io::Result<()> {
+        self.deadline = None;
+        self.tcp.set_read_timeout(Some(Duration::from_millis(10)))?;
+        self.tcp.set_write_timeout(Some(Duration::from_secs(1)))?;
+        self.tcp.set_nodelay(true)
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline.or(self.poll_deadline) {
+            self.tcp.set_read_timeout(Some(Self::remaining(deadline)?))?;
+        }
+        self.tcp.read(buf)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            self.tcp.set_write_timeout(Some(Self::remaining(deadline)?))?;
+        }
+        self.tcp.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tcp.flush()
+    }
+}
 
 // ─── Configuration ────────────────────────────────────────────────
 
@@ -61,8 +108,8 @@ pub struct WebSocketTransportConfig {
 
 /// A stream that is either plain TCP or TLS-wrapped TCP (used for authentication requests)
 enum AuthStream {
-    Plain(TcpStream),
-    Tls(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
+    Plain(DeadlineStream),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, DeadlineStream>>),
 }
 
 impl Read for AuthStream {
@@ -134,10 +181,13 @@ fn connect_auth_stream(
 
     tracing::debug!("WebSocketTransport: resolved {} -> {}", addr, socket_addr);
 
+    let deadline = Instant::now() + DEFAULT_READ_TIMEOUT;
     let tcp = TcpStream::connect_timeout(&socket_addr, DEFAULT_CONNECT_TIMEOUT).map_err(|e| format!("TCP connect failed: {}", e))?;
-
-    tcp.set_read_timeout(Some(DEFAULT_READ_TIMEOUT))
-        .map_err(|e| format!("set read timeout: {}", e))?;
+    let tcp = DeadlineStream {
+        tcp,
+        deadline: Some(deadline),
+        poll_deadline: None,
+    };
 
     if use_tls {
         let tls_config = build_tls_config(custom_root_certs)?;
@@ -148,7 +198,7 @@ fn connect_auth_stream(
         let tls_conn = rustls::ClientConnection::new(tls_config, server_name).map_err(|e| format!("TLS init failed: {}", e))?;
         let tls_stream = rustls::StreamOwned::new(tls_conn, tcp);
         tracing::debug!("WebSocketTransport: TLS connected to {}", addr);
-        Ok(AuthStream::Tls(tls_stream))
+        Ok(AuthStream::Tls(Box::new(tls_stream)))
     } else {
         Ok(AuthStream::Plain(tcp))
     }
@@ -178,18 +228,9 @@ fn parse_digest_challenge(header: &str) -> HashMap<String, String> {
 }
 
 /// Build an Authorization header for HTTP Digest Auth
-fn build_digest_response(
-    username: &str,
-    password: &str,
-    realm: &str,
-    nonce: &str,
-    qop: &str,
-    uri: &str,
-    method: &str,
-    opaque: Option<&str>,
-) -> String {
+fn build_digest_response(username: &str, password: &str, realm: &str, nonce: &str, qop: &str, uri: &str, opaque: Option<&str>) -> String {
     let ha1 = md5_hex(&format!("{}:{}:{}", username, realm, password));
-    let ha2 = md5_hex(&format!("{}:{}", method, uri));
+    let ha2 = md5_hex(&format!("GET:{}", uri));
 
     let nc = "00000001";
     let cnonce = format!(
@@ -223,7 +264,7 @@ fn build_digest_response(
 
 pub struct WebSocketTransport {
     config: WebSocketTransportConfig,
-    ws: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
+    ws: Option<WebSocket<MaybeTlsStream<DeadlineStream>>>,
     last_activity_at: Instant,
     last_ping_at: Instant,
     last_ping_sent_at: Option<Instant>,
@@ -252,8 +293,8 @@ impl WebSocketTransport {
         let endpoint_path = &self.config.endpoint_path;
 
         // ── First request (unauthenticated) ──
-        let mut stream = connect_auth_stream(host, port, self.config.use_tls, &self.config.custom_root_certs)
-            .map_err(|e| NetworkError::ConnectionFailed(e))?;
+        let mut stream =
+            connect_auth_stream(host, port, self.config.use_tls, &self.config.custom_root_certs).map_err(NetworkError::ConnectionFailed)?;
 
         let request = format!(
             "GET {} HTTP/1.1\r\n\
@@ -300,8 +341,8 @@ impl WebSocketTransport {
                 .ok_or_else(|| NetworkError::ConnectionFailed("401 but no WWW-Authenticate header".to_string()))?;
 
             let challenge = www_auth
-                .splitn(2, ':')
-                .nth(1)
+                .split_once(':')
+                .map(|x| x.1)
                 .ok_or_else(|| NetworkError::ConnectionFailed("malformed WWW-Authenticate".to_string()))?
                 .trim();
 
@@ -326,12 +367,12 @@ impl WebSocketTransport {
 
             tracing::debug!("WebSocketTransport: digest realm={} qop={}", realm, qop);
 
-            let auth_header = build_digest_response(username, password, realm, nonce, qop, endpoint_path, "GET", opaque);
+            let auth_header = build_digest_response(username, password, realm, nonce, qop, endpoint_path, opaque);
 
             // ── Second request (authenticated) ──
             drop(stream);
             let mut stream2 = connect_auth_stream(host, port, self.config.use_tls, &self.config.custom_root_certs)
-                .map_err(|e| NetworkError::ConnectionFailed(e))?;
+                .map_err(NetworkError::ConnectionFailed)?;
 
             let auth_request = format!(
                 "GET {} HTTP/1.1\r\n\
@@ -382,10 +423,7 @@ impl WebSocketTransport {
         }
         Err(NetworkError::ConnectionFailed("no body in 200 response".to_string()))
     }
-}
-
-impl NetworkTransport for WebSocketTransport {
-    fn connect(&mut self) -> Result<(), NetworkError> {
+    fn connect_with_timeout(&mut self, timeout: Duration) -> Result<(), NetworkError> {
         // Drop any existing connection
         self.ws = None;
 
@@ -442,31 +480,45 @@ impl NetworkTransport for WebSocketTransport {
             .map_err(|e| NetworkError::ConnectionFailed(format!("DNS resolve failed for '{}': {}", addr, e)))?
             .next()
             .ok_or_else(|| NetworkError::ConnectionFailed(format!("no addresses found for '{}'", addr)))?;
-        let tcp = TcpStream::connect_timeout(&socket_addr, DEFAULT_CONNECT_TIMEOUT)
+        let deadline = Instant::now() + timeout;
+        let tcp = TcpStream::connect_timeout(&socket_addr, timeout)
             .map_err(|e| NetworkError::ConnectionFailed(format!("TCP connect failed: {}", e)))?;
+        let tcp = DeadlineStream {
+            tcp,
+            deadline: Some(deadline),
+            poll_deadline: None,
+        };
 
         let connector = if self.config.custom_root_certs.is_some() {
-            let tls_config = build_tls_config(&self.config.custom_root_certs).map_err(|e| NetworkError::ConnectionFailed(e))?;
+            let tls_config = build_tls_config(&self.config.custom_root_certs).map_err(NetworkError::ConnectionFailed)?;
             Some(Connector::Rustls(tls_config))
         } else {
             None
         };
 
-        let (ws, _response) = tungstenite::client_tls_with_config(request, tcp, None, connector)
+        let ws_config = tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(MAX_MESSAGE_BYTES),
+            max_frame_size: Some(MAX_MESSAGE_BYTES),
+            max_write_buffer_size: MAX_MESSAGE_BYTES * 2,
+            ..Default::default()
+        };
+        let (mut ws, _response) = tungstenite::client_tls_with_config(request, tcp, Some(ws_config), connector)
             .map_err(|e| NetworkError::ConnectionFailed(format!("WebSocket connect failed: {}", e)))?;
 
         tracing::debug!("WebSocketTransport: WebSocket connected");
 
         // Set non-blocking for polling and TCP_NODELAY as recommended
-        match ws.get_ref() {
+        match ws.get_mut() {
             MaybeTlsStream::Plain(stream) => {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
-                let _ = stream.set_nodelay(true);
+                stream
+                    .finish_handshake()
+                    .map_err(|error| NetworkError::ConnectionFailed(error.to_string()))?;
             }
             MaybeTlsStream::Rustls(tls_stream) => {
-                let tcp = tls_stream.get_ref();
-                let _ = tcp.set_read_timeout(Some(Duration::from_millis(10)));
-                let _ = tcp.set_nodelay(true);
+                tls_stream
+                    .get_mut()
+                    .finish_handshake()
+                    .map_err(|error| NetworkError::ConnectionFailed(error.to_string()))?;
             }
             _ => {}
         }
@@ -481,13 +533,19 @@ impl NetworkTransport for WebSocketTransport {
 
         Ok(())
     }
+}
+
+impl NetworkTransport for WebSocketTransport {
+    fn connect(&mut self) -> Result<(), NetworkError> {
+        self.connect_with_timeout(DEFAULT_CONNECT_TIMEOUT)
+    }
 
     fn send_reliable(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
         let ws = self
             .ws
             .as_mut()
             .ok_or_else(|| NetworkError::SendFailed("not connected".to_string()))?;
-        ws.send(Message::Binary(payload.to_vec().into()))
+        ws.send(Message::Binary(payload.to_vec()))
             .map_err(|e| NetworkError::SendFailed(format!("WebSocket send failed: {}", e)))
     }
 
@@ -501,6 +559,14 @@ impl NetworkTransport for WebSocketTransport {
             Some(ws) => ws,
             None => return vec![],
         };
+        // Tungstenite may read many continuation frames before returning one
+        // message. One absolute deadline bounds the entire polling operation.
+        let deadline = Some(Instant::now() + Duration::from_millis(10));
+        match ws.get_mut() {
+            MaybeTlsStream::Plain(stream) => stream.poll_deadline = deadline,
+            MaybeTlsStream::Rustls(stream) => stream.get_mut().poll_deadline = deadline,
+            _ => {}
+        }
 
         let now = Instant::now();
 
@@ -531,13 +597,13 @@ impl NetworkTransport for WebSocketTransport {
             address: format!("{}:{}", self.config.host, self.config.port),
         };
 
-        loop {
+        for _ in 0..MAX_MESSAGES_PER_POLL {
             match ws.read() {
                 Ok(Message::Binary(data)) => {
                     self.last_activity_at = Instant::now();
                     messages.push(NetworkMessage {
                         source: source.clone(),
-                        payload: data.into(),
+                        payload: data,
                         timestamp: Instant::now(),
                     });
                 }
@@ -556,11 +622,11 @@ impl NetworkTransport for WebSocketTransport {
                         let mut buf = [0u8; 8];
                         buf.copy_from_slice(&payload[..8]);
                         let pong_id = u64::from_be_bytes(buf);
-                        if Some(pong_id) == self.last_ping_id {
-                            if let Some(sent_at) = self.last_ping_sent_at {
-                                let rtt = rx_at.duration_since(sent_at);
-                                tracing::trace!("WebSocketTransport: ping rtt_ms={:.1}", rtt.as_secs_f64() * 1000.0);
-                            }
+                        if Some(pong_id) == self.last_ping_id
+                            && let Some(sent_at) = self.last_ping_sent_at
+                        {
+                            let rtt = rx_at.duration_since(sent_at);
+                            tracing::trace!("WebSocketTransport: ping rtt_ms={:.1}", rtt.as_secs_f64() * 1000.0);
                         }
                     }
                 }
@@ -629,5 +695,173 @@ impl NetworkTransport for WebSocketTransport {
 
     fn is_connected(&self) -> bool {
         self.ws.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn silent_plain_upgrade_and_tls_peers_obey_connection_deadline() {
+        for use_tls in [false, true] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut transport = WebSocketTransport::new(WebSocketTransportConfig {
+                host: "127.0.0.1".to_string(),
+                port: listener.local_addr().unwrap().port(),
+                use_tls,
+                custom_root_certs: use_tls.then(Vec::new),
+                basic_auth_credentials: None,
+                digest_auth_credentials: None,
+                endpoint_path: "/".to_string(),
+                subprotocol: None,
+                user_agent: "magentastation-test".to_string(),
+                heartbeat_interval: Duration::from_secs(10),
+                heartbeat_timeout: Duration::from_secs(30),
+            });
+            let peer = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut bytes = [0; 4096];
+                assert!(stream.read(&mut bytes).unwrap() > 0);
+                while stream.read(&mut bytes).unwrap_or(0) > 0 {}
+            });
+            let start = Instant::now();
+            assert!(transport.connect_with_timeout(Duration::from_millis(150)).is_err());
+            assert!(start.elapsed() < Duration::from_secs(2), "silent peer must not stall connection");
+            assert!(!transport.is_connected());
+            peer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn trickled_reads_do_not_restart_handshake_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut stream = DeadlineStream {
+            tcp,
+            deadline: Some(Instant::now() + Duration::from_millis(100)),
+            poll_deadline: None,
+        };
+        peer.write_all(&[1]).unwrap();
+        assert_eq!(stream.read(&mut [0]).unwrap(), 1);
+        stream.deadline = Some(Instant::now() - Duration::from_millis(1));
+        peer.write_all(&[2]).unwrap();
+        assert_eq!(stream.read(&mut [0]).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn endless_empty_continuations_cannot_hold_a_poll_or_shutdown() {
+        use tungstenite::protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket
+                .send(Message::Frame(Frame::message(vec![1], OpCode::Data(Data::Binary), false)))
+                .unwrap();
+            let stop = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < stop {
+                if socket
+                    .send(Message::Frame(Frame::message(Vec::new(), OpCode::Data(Data::Continue), false)))
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let mut transport = WebSocketTransport::new(WebSocketTransportConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            use_tls: false,
+            custom_root_certs: None,
+            basic_auth_credentials: None,
+            digest_auth_credentials: None,
+            endpoint_path: "/".to_string(),
+            subprotocol: None,
+            user_agent: "magentastation-test".to_string(),
+            heartbeat_interval: Duration::from_secs(10),
+            heartbeat_timeout: Duration::from_secs(30),
+        });
+        transport.connect().unwrap();
+        let started = Instant::now();
+        assert!(transport.receive_reliable().is_empty());
+        let elapsed = started.elapsed();
+        transport.disconnect();
+        peer.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "unfinished fragments must not extend the polling deadline"
+        );
+    }
+
+    #[test]
+    fn polling_retains_partial_headers_and_makes_progress_through_ping_floods() {
+        for partial_header in [true, false] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+            let peer = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut raw = stream.try_clone().unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                if partial_header {
+                    raw.write_all(&[0x82]).unwrap();
+                } else {
+                    for _ in 0..100 {
+                        socket.send(Message::Ping(Vec::new())).unwrap();
+                    }
+                }
+                ready_tx.send(()).unwrap();
+                continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                if partial_header {
+                    raw.write_all(&[3, b'a', b'b', b'c']).unwrap();
+                } else {
+                    socket.send(Message::Binary(b"abc".to_vec())).unwrap();
+                }
+                continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            let mut transport = WebSocketTransport::new(WebSocketTransportConfig {
+                host: "127.0.0.1".to_string(),
+                port,
+                use_tls: false,
+                custom_root_certs: None,
+                basic_auth_credentials: None,
+                digest_auth_credentials: None,
+                endpoint_path: "/".to_string(),
+                subprotocol: None,
+                user_agent: "magentastation-test".to_string(),
+                heartbeat_interval: Duration::from_secs(10),
+                heartbeat_timeout: Duration::from_secs(30),
+            });
+            transport.connect().unwrap();
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let start = Instant::now();
+            assert!(transport.receive_reliable().is_empty());
+            assert!(start.elapsed() < Duration::from_millis(200));
+            continue_tx.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let messages = loop {
+                let messages = transport.receive_reliable();
+                if !messages.is_empty() {
+                    break messages;
+                }
+                assert!(Instant::now() < deadline);
+            };
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].payload, b"abc");
+            transport.disconnect();
+            continue_tx.send(()).unwrap();
+            peer.join().unwrap();
+        }
     }
 }

@@ -175,8 +175,8 @@ mod tests {
 
         assert_eq!(pdu.call_identifier, 4);
         assert_eq!(pdu.call_time_out_set_up_phase, CallTimeoutSetupPhase::T30s);
-        assert_eq!(pdu.hook_method_selection, false);
-        assert_eq!(pdu.simplex_duplex_selection, false);
+        assert!(!pdu.hook_method_selection);
+        assert!(!pdu.simplex_duplex_selection);
         // assert_eq!(pdu.basic_service_information, None);
         assert_eq!(pdu.call_status, None);
         assert_eq!(pdu.notification_indicator, None);
@@ -196,8 +196,8 @@ mod tests {
 
         assert_eq!(pdu.call_identifier, 4);
         assert_eq!(pdu.call_time_out_set_up_phase, CallTimeoutSetupPhase::T30s);
-        assert_eq!(pdu.hook_method_selection, false);
-        assert_eq!(pdu.simplex_duplex_selection, false);
+        assert!(!pdu.hook_method_selection);
+        assert!(!pdu.simplex_duplex_selection);
         // assert_eq!(pdu.basic_service_information, None);
         assert_eq!(pdu.call_status, None);
         assert_eq!(pdu.notification_indicator, None);

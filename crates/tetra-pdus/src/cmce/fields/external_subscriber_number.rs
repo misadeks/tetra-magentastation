@@ -78,7 +78,7 @@ pub fn decode(field: &Type3FieldGeneric) -> Option<String> {
     if field.field_id != CmceType3ElemId::ExtSubscriberNum.into_raw() {
         return None;
     }
-    if field.len == 0 || field.len % 4 != 0 {
+    if field.len == 0 || !field.len.is_multiple_of(4) {
         return None;
     }
     let n = field.len / 4;

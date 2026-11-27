@@ -42,7 +42,7 @@ pub struct ULocationUpdateDemand {
     pub group_identity_location_demand: Option<GroupIdentityLocationDemand>,
     /// Type3, 3 bits, Group report response
     pub group_report_response: Option<Type3FieldGeneric>,
-    /// Type3, 3 bits, See ETSI EN 300 392-7 [8],
+    /// Type3, 3 bits, See ETSI EN 300 392-7 \[8\],
     pub authentication_uplink: Option<Type3FieldGeneric>,
     /// Type3, 3 bits, See note 2,
     pub extended_capabilities: Option<Type3FieldGeneric>,
@@ -88,10 +88,7 @@ impl ULocationUpdateDemand {
         let class_of_ms = typed::parse_type2_struct(obit, buffer, ClassOfMs::from_bitbuf)?;
         // Type2
         let val = typed::parse_type2_generic(obit, buffer, 3, "energy_saving_mode")?;
-        let energy_saving_mode = match val {
-            Some(v) => Some(EnergySavingMode::try_from(v).unwrap()), // Never fails
-            None => None,
-        };
+        let energy_saving_mode = val.map(|v| EnergySavingMode::try_from(v).unwrap());
         // Type2
         let la_information = typed::parse_type2_generic(obit, buffer, 15, "la_information")?;
         let la_information = match la_information {

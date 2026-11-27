@@ -52,16 +52,36 @@ fn executable_rejects_non_ms_roles_before_constructing_a_radio() {
         fs::remove_file(path).unwrap();
         let output = result.unwrap();
         assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("unknown variant"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid TOML syntax or field value"));
     }
 }
 
 #[test]
 fn offline_ms_process_exposes_management_without_radio_or_protocol_ticks() {
+    for _ in 0..5 {
+        offline_management_flow();
+    }
+}
+
+fn read_response(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Value {
+    loop {
+        match socket.read().unwrap() {
+            Message::Text(data) => return serde_json::from_str(&data).unwrap(),
+            Message::Binary(data) => return serde_json::from_slice(&data).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => socket.flush().unwrap(),
+            message => panic!("unexpected control message: {message:?}"),
+        }
+    }
+}
+
+fn offline_management_flow() {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let unavailable_telemetry = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let telemetry_port = unavailable_telemetry.local_addr().unwrap().port();
+    drop(unavailable_telemetry);
     let config = std::env::temp_dir().join(format!(
         "bluestation-offline-{}-{}.toml",
         std::process::id(),
@@ -84,6 +104,10 @@ attach_groups = []
 [command]
 host = "127.0.0.1"
 port = {port}
+use_tls = false
+[telemetry]
+host = "127.0.0.1"
+port = {telemetry_port}
 use_tls = false
 "#
         ),
@@ -150,5 +174,94 @@ use_tls = false
         }
     }
     assert!(fixture.child.try_wait().unwrap().is_none());
-    socket.close(None).unwrap();
+    let original = fs::read_to_string(&fixture.config).unwrap();
+    let operational = format!("{original}\n[[contact]]\nname = \"test contact\"\nissi = 123\n");
+    socket
+        .send(Message::Binary(
+            json!({"Management": {"SetConfig": {"handle": 45, "toml": operational}}})
+                .to_string()
+                .into_bytes(),
+        ))
+        .unwrap();
+    let response = read_response(&mut socket);
+    assert_eq!(response["Management"]["Ack"]["accepted"], true);
+    assert_eq!(response["Management"]["Ack"]["restart_required"], false);
+    socket
+        .send(Message::Binary(
+            json!({"Management": {"ApplyConfig": {"handle": 46}}}).to_string().into_bytes(),
+        ))
+        .unwrap();
+    let response = read_response(&mut socket);
+    assert_eq!(response["Management"]["Ack"]["accepted"], true);
+    assert_eq!(response["Management"]["Ack"]["restart_required"], false);
+    assert!(
+        fixture.child.try_wait().unwrap().is_none(),
+        "operational/no-op Apply must not restart"
+    );
+    let staged = original.replace("issi = 1000001", "issi = 1000002");
+    for (handle, toml, accepted) in [
+        (50, staged.clone(), true),
+        (
+            51,
+            format!("{staged}\n[phy_io.soapysdr]\ndevice = \"unused\"\nsample_rate = 600000\nrx_gain_lna = \"dummy-gain-secret\"\n"),
+            false,
+        ),
+        (
+            52,
+            format!("{staged}\n[phy_io.soapysdr]\ndevice = \"unused\"\nsample_rate = 600000\ntx_gain_dac = false\n"),
+            false,
+        ),
+        (
+            53,
+            format!("{staged}\n[phy_io.soapysdr]\ndevice = \"unused\"\nsample_rate = 600000\nrx_gain_lna = 1.25\ntx_gain_dac = -3\n"),
+            true,
+        ),
+    ] {
+        socket
+            .send(Message::Binary(
+                json!({"Management": {"SetConfig": {"handle": handle, "toml": toml}}})
+                    .to_string()
+                    .into_bytes(),
+            ))
+            .unwrap();
+        let response = read_response(&mut socket);
+        let ack = &response["Management"]["Ack"];
+        assert_eq!(ack["handle"], handle);
+        assert_eq!(ack["accepted"], accepted);
+        assert!(!response.to_string().contains("dummy-gain-secret"));
+    }
+    socket
+        .send(Message::Binary(
+            json!({"Management": {"ApplyConfig": {"handle": 54}}}).to_string().into_bytes(),
+        ))
+        .unwrap();
+    let response = read_response(&mut socket);
+    assert_eq!(response["Management"]["Ack"]["handle"], 54);
+    assert_eq!(response["Management"]["Ack"]["accepted"], true);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = fixture.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "acknowledged restart did not finish");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(75));
+    assert!(fs::read_to_string(&fixture.config).unwrap().contains("issi = 1000002"));
+}
+
+#[test]
+fn startup_configuration_diagnostics_never_echo_credential_input() {
+    let path = std::env::temp_dir().join(format!("magentastation-invalid-{}.toml", std::process::id()));
+    for input in ["password = \"dummy-startup-secret\n", "password = [\"dummy-startup-secret\"]\n"] {
+        fs::write(&path, input).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_magentastation")).arg(&path).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stdout.contains("dummy-startup-secret"));
+        assert!(!stderr.contains("dummy-startup-secret"));
+        assert!(stderr.contains("invalid TOML syntax or field value"));
+    }
+    fs::remove_file(path).unwrap();
 }

@@ -19,6 +19,12 @@ pub struct DefragBuffer {
     pub buffer: BitBuffer,
 }
 
+impl Default for DefragBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefragBuffer {
     pub fn new() -> Self {
         Self {

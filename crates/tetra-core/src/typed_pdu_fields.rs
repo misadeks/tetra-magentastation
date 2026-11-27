@@ -302,7 +302,7 @@ pub mod typed {
             );
             return Err(PduParseErr::InconsistentLength {
                 expected: len_bits,
-                found: (buffer.get_pos() - start_pos) as usize,
+                found: (buffer.get_pos() - start_pos),
             });
         };
 
@@ -410,31 +410,35 @@ pub mod typed {
 
     fn parse_type4_header(buffer: &mut BitBuffer, expected_id: u64) -> Result<Option<(usize, usize)>, PduParseErr> {
         // Check whether the element is present
-        let id = expected_id.into();
+        let id = expected_id;
         let field_present = peek_type34_mbit_and_id(buffer, id)?;
         if !field_present {
             return Ok(None);
         }
 
-        // Target field is present. Advance buffer position and read field contents
-        buffer.seek_rel(5);
-        let len_bits = match buffer.read_bits(11) {
-            Some(x) => x as usize,
-            None => {
-                return Err(PduParseErr::BufferEnded {
-                    field: Some("parse_type4_header len_bits"),
-                });
-            }
-        };
-        // tracing::debug!("MmType4FieldUl: len_bits: {}", len_bits);
-        let num_elems = match buffer.read_bits(6) {
-            Some(x) => x as usize,
-            None => {
-                return Err(PduParseErr::BufferEnded {
-                    field: Some("parse_type4_header num_elems"),
-                });
-            }
-        };
+        // Length includes the six-bit element count. Validate the entire field
+        // against the remaining window before advancing the cursor.
+        let len_bits = buffer.peek_bits_posoffset(5, 11).ok_or(PduParseErr::BufferEnded {
+            field: Some("parse_type4_header len_bits"),
+        })? as usize;
+        let payload_bits = len_bits.checked_sub(6).ok_or(PduParseErr::InvalidValue {
+            field: "parse_type4_header len_bits",
+            value: len_bits as u64,
+        })?;
+        if buffer
+            .get_len_remaining()
+            .checked_sub(16)
+            .filter(|&remaining| remaining >= len_bits)
+            .is_none()
+        {
+            return Err(PduParseErr::BufferEnded {
+                field: Some("parse_type4_header data"),
+            });
+        }
+        let num_elems = buffer.peek_bits_posoffset(16, 6).ok_or(PduParseErr::BufferEnded {
+            field: Some("parse_type4_header num_elems"),
+        })? as usize;
+        buffer.seek_rel(22);
 
         tracing::trace!(
             "parse_type4_header got header for {:2}, len {}, count {}: {}",
@@ -444,7 +448,7 @@ pub mod typed {
             buffer.dump_bin()
         );
 
-        Ok(Some((num_elems, len_bits - 6)))
+        Ok(Some((num_elems, payload_bits)))
     }
 
     /// Parse a Type-4 element into a Vec of structs that implement `from_bitbuf`.
@@ -486,7 +490,7 @@ pub mod typed {
                     );
                     return Err(PduParseErr::InconsistentLength {
                         expected: len_bits,
-                        found: (buffer.get_pos() - start_pos) as usize,
+                        found: (buffer.get_pos() - start_pos),
                     });
                 };
 
@@ -497,7 +501,7 @@ pub mod typed {
     }
 
     /// Parse a Type-4 element into a placeholder struct type, pending proper implementation.
-    /// Imperfect as we cannot know individual element sizes, besides issues with overflowing the 64-bit read
+    /// Individual element sizes are unknown; only the first 64 payload bits are retained.
     pub fn parse_type4_generic<E>(obit: bool, buffer: &mut BitBuffer, expected_id: E) -> Result<Option<Type4FieldGeneric>, PduParseErr>
     where
         E: Into<u64>,
@@ -625,6 +629,130 @@ pub mod typed {
 mod tests {
     use super::{Type3FieldGeneric, typed};
     use crate::bitbuffer::BitBuffer;
+    use crate::pdu_parse_error::PduParseErr;
+
+    fn assert_type4_error_without_mutation(buffer: &BitBuffer, expected: PduParseErr) {
+        let mut generic_buffer = buffer.clone();
+        assert_eq!(typed::parse_type4_generic(true, &mut generic_buffer, 2u8), Err(expected));
+        assert_eq!(generic_buffer.get_raw_pos(), buffer.get_raw_pos());
+        assert_eq!(generic_buffer.get_raw_start(), buffer.get_raw_start());
+        assert_eq!(generic_buffer.get_raw_end(), buffer.get_raw_end());
+        assert_eq!(generic_buffer.to_bitstr(), buffer.to_bitstr());
+
+        let mut struct_buffer = buffer.clone();
+        let called = std::cell::Cell::new(false);
+        assert!(
+            typed::parse_type4_struct(true, &mut struct_buffer, 2u8, |buf| {
+                called.set(true);
+                buf.read_field(1, "test element")
+            })
+            .is_err()
+        );
+        assert!(!called.get());
+        assert_eq!(struct_buffer.get_raw_pos(), buffer.get_raw_pos());
+        assert_eq!(struct_buffer.get_raw_start(), buffer.get_raw_start());
+        assert_eq!(struct_buffer.get_raw_end(), buffer.get_raw_end());
+    }
+
+    #[test]
+    fn regression_type4_rejects_lengths_below_count_without_mutation() {
+        for len in 0..6 {
+            let mut buffer = BitBuffer::new_autoexpand(32);
+            typed::write_type34_header_generic(&mut buffer, 2);
+            buffer.write_bits(len, 11);
+            buffer.write_bits(1, 6);
+            buffer.seek(0);
+            assert_type4_error_without_mutation(
+                &buffer,
+                PduParseErr::InvalidValue {
+                    field: "parse_type4_header len_bits",
+                    value: len,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn regression_type4_rejects_truncated_headers_without_mutation() {
+        let mut buffer = BitBuffer::new_autoexpand(32);
+        typed::write_type34_header_generic(&mut buffer, 2);
+        buffer.write_bits(6, 11);
+        buffer.write_bits(0, 6);
+        buffer.seek(0);
+        for end in 5..22 {
+            let mut truncated = buffer.clone();
+            truncated.set_raw_end(end);
+            let field = if end < 16 {
+                "parse_type4_header len_bits"
+            } else {
+                "parse_type4_header data"
+            };
+            assert_type4_error_without_mutation(&truncated, PduParseErr::BufferEnded { field: Some(field) });
+        }
+    }
+
+    #[test]
+    fn regression_type4_checks_full_payload_against_remaining_window() {
+        let mut buffer = BitBuffer::new_autoexpand(128);
+        buffer.write_bits(0b101, 3);
+        typed::write_type34_header_generic(&mut buffer, 2);
+        buffer.write_bits(86, 11);
+        buffer.write_bits(1, 6);
+        buffer.write_ones(80);
+        buffer.set_raw_pos(3);
+        buffer.set_raw_start(3);
+        // Backing storage contains all 80 payload bits, but only 64 are readable.
+        buffer.set_raw_end(3 + 22 + 64);
+        assert_type4_error_without_mutation(
+            &buffer,
+            PduParseErr::BufferEnded {
+                field: Some("parse_type4_header data"),
+            },
+        );
+    }
+
+    #[test]
+    fn regression_type4_valid_empty_and_long_payloads_consume_exact_length() {
+        for payload_bits in [0, 1, 64, 80] {
+            let mut buffer = BitBuffer::new_autoexpand(128);
+            buffer.write_bits(0b101, 3);
+            typed::write_type34_header_generic(&mut buffer, 2);
+            buffer.write_bits(payload_bits + 6, 11);
+            buffer.write_bits(u64::from(payload_bits != 0), 6);
+            buffer.write_ones(payload_bits as usize);
+            buffer.write_bits(0b101, 3);
+            buffer.set_raw_pos(3);
+            buffer.set_raw_start(3);
+            let parsed = typed::parse_type4_generic(true, &mut buffer, 2u8).unwrap().unwrap();
+            assert_eq!(parsed.len, payload_bits as usize);
+            assert_eq!(parsed.elems, usize::from(payload_bits != 0));
+            let expected = match payload_bits {
+                0 => 0,
+                1 => 1,
+                _ => u64::MAX,
+            };
+            assert_eq!(parsed.data, expected);
+            assert_eq!(buffer.get_pos(), 22 + payload_bits as usize);
+            assert_eq!(buffer.read_bits(3), Some(0b101));
+        }
+
+        let mut buffer = BitBuffer::from_bitstr("1001000000000110000000");
+        assert_eq!(
+            typed::parse_type4_struct(true, &mut buffer, 2u8, |buf| buf.read_field(1, "unused")),
+            Ok(Some(vec![]))
+        );
+        assert_eq!(buffer.get_len_remaining(), 0);
+    }
+
+    #[test]
+    fn regression_type4_absent_fields_leave_cursor_unchanged() {
+        let buffer = BitBuffer::from_bitstr("10010");
+        let mut absent = buffer.clone();
+        assert_eq!(typed::parse_type4_generic(false, &mut absent, 2u8), Ok(None));
+        assert_eq!(absent.get_pos(), 0);
+        assert_eq!(typed::parse_type4_generic(true, &mut absent, 3u8), Ok(None));
+        assert_eq!(absent.get_pos(), 0);
+    }
 
     #[test]
     fn type3_generic_roundtrip_supports_96_bits() {

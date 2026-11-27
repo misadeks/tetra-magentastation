@@ -13,15 +13,15 @@ impl SsiRange {
 }
 
 /// A sorted, non-overlapping (disjoint) list of SSI ranges.
-/// Can only be constructed via `sort_non_overlapping()`.
+/// Constructed via [`Self::from_vec_ssirange`] or [`Self::from_vec_tuple`].
 #[derive(Debug, Clone)]
 pub struct SortedDisjointSsiRanges(Vec<SsiRange>);
 impl SortedDisjointSsiRanges {
-    /// Takes Vec<SsiRange> and sorts it by start address, for fast lookups.
+    /// Takes `Vec<SsiRange>` and sorts it by start address, for fast lookups.
     /// Also asserts that ranges are disjoint, e.g, do not overlap.
     /// Returns a SortedDisjointSsiRanges wrapper which can be used for efficient lookups. See `contains()`.
     pub fn from_vec_ssirange(mut ranges: Vec<SsiRange>) -> Self {
-        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+        ranges.sort_by_key(|a| a.start);
 
         // Sanity check for overlapping ranges
         let mut lower_bound = 0;
@@ -33,7 +33,7 @@ impl SortedDisjointSsiRanges {
         Self(ranges)
     }
 
-    /// Takes Vec<(start: u32, end: u32)> and sorts it by start address, for fast lookups.
+    /// Takes `Vec<(u32, u32)>` and sorts it by start address, for fast lookups.
     /// Also asserts that ranges are disjoint, e.g, do not overlap.
     /// Returns a SortedDisjointSsiRanges wrapper which can be used for efficient lookups. See `contains()`.
     pub fn from_vec_tuple(tuples: Vec<(u32, u32)>) -> Self {

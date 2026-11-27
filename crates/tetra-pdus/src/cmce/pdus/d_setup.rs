@@ -265,17 +265,17 @@ mod tests {
 
         assert_eq!(pdu.call_identifier, 4);
         assert_eq!(pdu.call_time_out, CallTimeout::T5m);
-        assert_eq!(pdu.hook_method_selection, false);
-        assert_eq!(pdu.simplex_duplex_selection, false);
+        assert!(!pdu.hook_method_selection);
+        assert!(!pdu.simplex_duplex_selection);
 
         assert_eq!(pdu.basic_service_information.circuit_mode_type, CircuitModeType::TchS);
-        assert_eq!(pdu.basic_service_information.encryption_flag, false);
+        assert!(!pdu.basic_service_information.encryption_flag);
         assert_eq!(pdu.basic_service_information.communication_type, CommunicationType::P2Mp);
         assert_eq!(pdu.basic_service_information.slots_per_frame, None);
         assert_eq!(pdu.basic_service_information.speech_service, Some(0));
 
         assert_eq!(pdu.transmission_grant, TransmissionGrant::GrantedToOtherUser);
-        assert_eq!(pdu.transmission_request_permission, false);
+        assert!(!pdu.transmission_request_permission);
         assert_eq!(pdu.call_priority, 0);
         assert!(pdu.notification_indicator.is_none());
         assert!(pdu.temporary_address.is_none());
@@ -301,15 +301,15 @@ mod tests {
 
         assert_eq!(pdu.call_identifier, 195);
         assert_eq!(pdu.call_time_out, CallTimeout::Infinite);
-        assert_eq!(pdu.hook_method_selection, false);
-        assert_eq!(pdu.simplex_duplex_selection, false);
+        assert!(!pdu.hook_method_selection);
+        assert!(!pdu.simplex_duplex_selection);
         assert_eq!(pdu.basic_service_information.circuit_mode_type, CircuitModeType::TchS);
-        assert_eq!(pdu.basic_service_information.encryption_flag, false);
+        assert!(!pdu.basic_service_information.encryption_flag);
         assert_eq!(pdu.basic_service_information.communication_type, CommunicationType::P2Mp);
         assert_eq!(pdu.basic_service_information.slots_per_frame, None);
         assert_eq!(pdu.basic_service_information.speech_service, Some(0));
         assert_eq!(pdu.transmission_grant, TransmissionGrant::GrantedToOtherUser);
-        assert_eq!(pdu.transmission_request_permission, false);
+        assert!(!pdu.transmission_request_permission);
         assert_eq!(pdu.call_priority, 0);
         assert!(pdu.notification_indicator.is_none());
         assert!(pdu.temporary_address.is_none());

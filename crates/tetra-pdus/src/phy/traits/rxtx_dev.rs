@@ -1,10 +1,12 @@
 use tetra_core::TdmaTime;
 use tetra_core::TrainingSequence;
+pub use tetra_saps::tmv::TxBurstPlacement;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum RxTxDevError {
     RxEndOfData,
     RxReadError,
+    TxTuneError,
 }
 
 #[derive(Debug, Default)]
@@ -31,10 +33,8 @@ pub struct TxSlotBits<'a> {
     pub time: TdmaTime,
     /// Burst to transmit in full slot
     pub slot: Option<&'a [u8]>,
-    // /// Burst to transmit in subslot 1
-    // pub subslot1: Option<&'a [u8]>,
-    // /// Burst to transmit in subslot 2
-    // pub subslot2: Option<&'a [u8]>,
+    /// Active burst position, independent of the payload's storage.
+    pub placement: TxBurstPlacement,
 }
 
 /// Diagnostic snapshot of the MS transmit look-ahead: how far the TX
@@ -167,7 +167,10 @@ pub trait RxTxDev {
     /// oscillator moves; the uplink modulator (built at digital offset 0) needs
     /// no rebuild.
     ///
-    /// The default is a no-op, appropriate for fixed-frequency devices and tests
-    /// that do not transmit.
-    fn set_tx_frequency(&mut self, _carrier_hz: f64) {}
+    /// Success confirms that the requested carrier was applied. Failure must
+    /// leave the caller's TX readiness invalid. Fixed-frequency devices that
+    /// cannot apply a runtime retune reject it by default.
+    fn set_tx_frequency(&mut self, _carrier_hz: f64) -> Result<(), RxTxDevError> {
+        Err(RxTxDevError::TxTuneError)
+    }
 }

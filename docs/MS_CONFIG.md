@@ -99,7 +99,8 @@ Normal MS files omit this section; the cell supplies identity and RF data.
 Legacy `main_carrier`, `freq_band`, `freq_offset`, `duplex_spacing`,
 `custom_duplex_spacing` and `reverse_operation` are accepted but do not
 replace received SYSINFO. If the section is present, include `location_area`.
-Canonical MS write-back omits it.
+Canonical MS write-back omits default seeds, but preserves nondefault legacy
+values so a read/edit/write cycle cannot discard them.
 
 BS broadcast/service, subscriber-routing and timezone fields, and `[brew]`,
 are not supported configuration sections here.

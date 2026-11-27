@@ -57,9 +57,10 @@ impl MacEndDl {
         Ok(s)
     }
 
+    /// Header length in bits; channel-allocation elements are not yet supported.
     pub fn compute_hdr_len(has_slotgrant: bool, has_chanalloc: bool) -> usize {
         assert!(!has_chanalloc, "unimplemented");
-        2 + 1 + 1 + 1 + 6 + 1 + (if has_slotgrant { 6 } else { 0 }) + 1
+        2 + 1 + 1 + 1 + 6 + 1 + (if has_slotgrant { 8 } else { 0 }) + 1
     }
 
     pub fn to_bitbuf(&self, buf: &mut BitBuffer) {
@@ -100,5 +101,48 @@ impl fmt::Display for MacEndDl {
             write!(f, "  chan_alloc_element: {:?}", v)?;
         }
         write!(f, "}}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::umac::enums::{
+        basic_slotgrant_cap_alloc::BasicSlotgrantCapAlloc, basic_slotgrant_granting_delay::BasicSlotgrantGrantingDelay,
+    };
+
+    #[test]
+    fn regression_header_helper_matches_exact_encoding_with_and_without_grant() {
+        for has_slotgrant in [false, true] {
+            for fill_bits in [false, true] {
+                for pos_of_grant in [0, 1] {
+                    let pdu = MacEndDl {
+                        fill_bits,
+                        pos_of_grant,
+                        length_ind: 46,
+                        slot_granting_element: has_slotgrant.then_some(BasicSlotgrant {
+                            capacity_allocation: BasicSlotgrantCapAlloc::Grant68Slots,
+                            granting_delay: BasicSlotgrantGrantingDelay::WaitForAnotherSlotgrantMessage,
+                        }),
+                        chan_alloc_element: None,
+                    };
+                    let header_bits = MacEndDl::compute_hdr_len(has_slotgrant, false);
+                    let mut buffer = BitBuffer::new(header_bits);
+                    pdu.to_bitbuf(&mut buffer);
+                    assert_eq!(buffer.get_pos(), header_bits);
+                    buffer.seek(0);
+                    let decoded = MacEndDl::from_bitbuf(&mut buffer).unwrap();
+                    assert_eq!(buffer.get_pos(), header_bits);
+                    assert_eq!(decoded.fill_bits, fill_bits);
+                    assert_eq!(decoded.pos_of_grant, pos_of_grant);
+                    assert_eq!(decoded.length_ind, 46);
+                    assert_eq!(decoded.slot_granting_element.is_some(), has_slotgrant);
+                    if let Some(grant) = decoded.slot_granting_element {
+                        assert_eq!(grant.capacity_allocation, BasicSlotgrantCapAlloc::Grant68Slots);
+                        assert_eq!(grant.granting_delay, BasicSlotgrantGrantingDelay::WaitForAnotherSlotgrantMessage);
+                    }
+                }
+            }
+        }
     }
 }

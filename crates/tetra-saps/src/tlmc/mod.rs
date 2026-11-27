@@ -108,23 +108,6 @@ pub struct TlmcConfigureReq {
     pub graceful_service_degradation_mode_control: Option<Todo>,
 }
 
-/// Clause 20.4.3
-/// TMC-CONFIGURE request: this primitive shall be used to accept or reject a channel change. It is also used for the
-/// LLC to provide the MAC with information about activity. It is used for the LLC to provide the MAC with timer
-/// information that may be needed in the napping procedure. It may also be used for the LLC to provide the MAC with
-/// information that the MAC may use to make choices about link adaptation. It may also be used to provide the MAC with
-/// retransmission strategy in graceful service degradation mode. The parameters shall be as defined in table 20.57.
-// #[derive(Debug, Clone)]
-// pub struct TmcTlConfigureReq {
-//     pub channel_change_handle: Option<Todo>,
-//     pub channel_change_accepted: Option<bool>,
-//     pub mle_activity_indicator: Option<Todo>,
-//     pub llc_timer_status: Option<Todo>,
-//     pub link_performance_info: Option<Todo>,
-//     pub endpoint_identifier: Option<EndpointId>,
-//     pub graceful_service_degradation_mode_control: Option<Todo>,
-// }
-
 /// 20.3.5.4.1c TL-CONFIGURE primitive
 /// TL-CONFIGURE request, confirm: this primitive shall be used to set up and configure the layer 2 according to the
 /// chosen cell parameters and the current state of the MS. It may also be used to provide the LLC and MAC with

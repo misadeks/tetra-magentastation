@@ -22,13 +22,11 @@
 //!   - the MS **scans** a list of downlink frequencies (or a carrier range),
 //!     finds a suitable serving cell, camps on it and derives its uplink/duplex
 //!     from that cell's D-MLE-SYSINFO (EN 300 392-2 cl. 18.4.2.2);
-//!   - a **carrier_override** pins extra parameters (colour-code lock, custom
-//!     duplex spacing, rx-only) to one specific frequency, applied when the
-//!     scanner lands on it.
+//!   - a **carrier_override** stores per-frequency hints for management; colour,
+//!     duplex and receive-only overrides are not enforced by the current stack.
 //!
-//! The codeplug is *data only*: it is read by the management/TNMM UI and (in a
-//! later phase) by the cell-selection/scan engine. It does not itself change any
-//! on-air behaviour.
+//! The management/TNMM UI reads the codeplug, and the cell-selection engine uses
+//! its network filters and scan candidates. Unsupported hints remain data only.
 
 use std::collections::HashSet;
 
@@ -82,18 +80,13 @@ fn components_from_dl_hz(dl_hz: u32) -> Result<(u8, u16, i16), String> {
 
 /// How a programmed frequency list enumerates its downlink carriers
 /// (**[impl policy]**). A single-frequency `List` is the former "fixed channel".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum FrequencyListMode {
     /// An explicit list of downlink frequencies.
+    #[default]
     List,
     /// A frequency range (band + carrier start/stop/step) enumerated on the fly.
     Range,
-}
-
-impl Default for FrequencyListMode {
-    fn default() -> Self {
-        FrequencyListMode::List
-    }
 }
 
 /// A group folder in the codeplug tree (organises talkgroups).
@@ -136,7 +129,7 @@ pub struct CfgNetwork {
 }
 
 /// A per-frequency override: pins extra camp parameters to one specific carrier.
-/// Applied when the scanner lands on this frequency.
+/// Stored for management; the current scanner does not apply these hints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CfgCarrierOverride {
     /// Human-readable label (unique within the codeplug).
@@ -147,13 +140,13 @@ pub struct CfgCarrierOverride {
     pub main_carrier: u16,
     /// Offset from the 25 kHz carrier: 0, 6250, -6250 or 12500 Hz.
     pub freq_offset_hz: i16,
-    /// Optional colour-code filter (only camp on a cell with this colour code).
+    /// Optional colour-code hint (not enforced).
     pub colour_code: Option<u8>,
     /// Optional duplex-spacing index hint (else derived from the cell's SYSINFO).
     pub duplex_index: Option<u8>,
     /// Optional per-carrier custom duplex spacing in Hz.
     pub custom_duplex_spacing: Option<u32>,
-    /// Receive-only: never transmit (registration/uplink suppressed) here.
+    /// Receive-only hint (not enforced; does not suppress registration/uplink).
     pub rx_only: bool,
 }
 
@@ -548,18 +541,18 @@ impl CfgCodeplug {
             if tg.name.trim().is_empty() {
                 return Err(format!("talkgroup gssi {} name must not be empty", tg.gssi));
             }
-            if let Some(cou) = tg.class_of_usage {
-                if cou > MAX_CLASS_OF_USAGE {
-                    return Err(format!(
-                        "talkgroup gssi {} class_of_usage must be 0..={} (3-bit)",
-                        tg.gssi, MAX_CLASS_OF_USAGE
-                    ));
-                }
+            if let Some(cou) = tg.class_of_usage
+                && cou > MAX_CLASS_OF_USAGE
+            {
+                return Err(format!(
+                    "talkgroup gssi {} class_of_usage must be 0..={} (3-bit)",
+                    tg.gssi, MAX_CLASS_OF_USAGE
+                ));
             }
-            if let Some(ref folder) = tg.folder {
-                if !folder_ids.contains(folder.as_str()) {
-                    return Err(format!("talkgroup gssi {} references unknown folder '{}'", tg.gssi, folder));
-                }
+            if let Some(ref folder) = tg.folder
+                && !folder_ids.contains(folder.as_str())
+            {
+                return Err(format!("talkgroup gssi {} references unknown folder '{}'", tg.gssi, folder));
             }
         }
 
@@ -587,21 +580,21 @@ impl CfgCodeplug {
                 return Err(format!("duplicate carrier_override name '{}'", co.name));
             }
             validate_rf(&co.name, co.freq_band, co.main_carrier, co.freq_offset_hz)?;
-            if let Some(cc) = co.colour_code {
-                if cc > MAX_COLOUR_CODE {
-                    return Err(format!(
-                        "carrier_override '{}' colour_code must be 0..={} (6-bit)",
-                        co.name, MAX_COLOUR_CODE
-                    ));
-                }
+            if let Some(cc) = co.colour_code
+                && cc > MAX_COLOUR_CODE
+            {
+                return Err(format!(
+                    "carrier_override '{}' colour_code must be 0..={} (6-bit)",
+                    co.name, MAX_COLOUR_CODE
+                ));
             }
-            if let Some(di) = co.duplex_index {
-                if di > MAX_DUPLEX_INDEX {
-                    return Err(format!(
-                        "carrier_override '{}' duplex_index must be 0..={} (3-bit)",
-                        co.name, MAX_DUPLEX_INDEX
-                    ));
-                }
+            if let Some(di) = co.duplex_index
+                && di > MAX_DUPLEX_INDEX
+            {
+                return Err(format!(
+                    "carrier_override '{}' duplex_index must be 0..={} (3-bit)",
+                    co.name, MAX_DUPLEX_INDEX
+                ));
             }
         }
 
@@ -1042,6 +1035,10 @@ fn contact_dto_to_cfg(dto: ContactDto) -> Result<CfgContact, String> {
 /// Assemble a [`CfgCodeplug`] from the parsed DTO sections. RF resolution errors
 /// (e.g. an off-grid `dl_freq`) surface here; range/cross-reference validation is
 /// performed separately by [`CfgCodeplug::validate`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "public conversion preserves the nine independent on-disk codeplug sections"
+)]
 pub fn codeplug_dto_to_cfg(
     folders: Option<Vec<FolderDto>>,
     talkgroups: Option<Vec<TalkgroupDto>>,
@@ -1053,6 +1050,33 @@ pub fn codeplug_dto_to_cfg(
     contacts: Option<Vec<ContactDto>>,
     settings: Option<CodeplugSettingsDto>,
 ) -> Result<CfgCodeplug, String> {
+    use super::parsing::reject_unknown_fields;
+    macro_rules! check_rows {
+        ($rows:expr, $section:literal) => {
+            for row in $rows.as_deref().unwrap_or_default() {
+                reject_unknown_fields($section, &row.extra)?;
+            }
+        };
+    }
+    check_rows!(folders, "folder");
+    check_rows!(talkgroups, "talkgroup");
+    check_rows!(networks, "network");
+    check_rows!(carrier_overrides, "carrier_override");
+    check_rows!(frequency_lists, "frequency_list");
+    check_rows!(scanlists, "scanlist");
+    check_rows!(gateways, "gateway");
+    check_rows!(contacts, "contact");
+    for row in frequency_lists.as_deref().unwrap_or_default() {
+        if let Some(range) = &row.range {
+            reject_unknown_fields("frequency_list.range", &range.extra)?;
+        }
+    }
+    if let Some(settings) = &settings {
+        reject_unknown_fields("codeplug", &settings.extra)?;
+        if let Some(display) = &settings.home_display {
+            reject_unknown_fields("codeplug.home_display", &display.extra)?;
+        }
+    }
     let folders = folders.unwrap_or_default().into_iter().map(folder_dto_to_cfg).collect();
     let talkgroups = talkgroups.unwrap_or_default().into_iter().map(talkgroup_dto_to_cfg).collect();
     let networks = networks.unwrap_or_default().into_iter().map(network_dto_to_cfg).collect();

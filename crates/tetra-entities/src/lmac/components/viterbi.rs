@@ -34,9 +34,21 @@ impl<const N: usize> ViterbiDecoder<N> {
 pub type TetraViterbiDecoder = ViterbiDecoder<4>;
 pub type TetraCodecViterbiDecoder = ViterbiDecoder<3>;
 
+impl Default for TetraViterbiDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TetraViterbiDecoder {
     pub fn new() -> Self {
         Self(tetra_phy_core::viterbi::TetraViterbiDecoder::new())
+    }
+}
+
+impl Default for TetraCodecViterbiDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

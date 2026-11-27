@@ -18,6 +18,7 @@ pub const SURVEY_MONITOR_TICK_LIMIT: u16 = 8;
 pub enum MleError {
     TruncatedPdu,
     InvalidProtocol(u8),
+    UnsupportedProtocol(Protocol),
     UnsupportedMlePdu(u8),
     UnsupportedManagement,
     CapacityExceeded,
@@ -71,8 +72,8 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    /// SNDCP retains the existing stack's CMCE endpoint until a separate SNDCP
-    /// entity is implemented; extracting MLE must not silently reroute traffic.
+    /// Legacy destination mapping; SNDCP downlink is rejected before delivery
+    /// until a separate packet-data entity is implemented.
     pub const fn destination(self) -> UpperLayer {
         match self {
             Self::Mm => UpperLayer::Mm,
@@ -474,7 +475,7 @@ impl MleCore {
         let protocol = match raw {
             1 => Protocol::Mm,
             2 => Protocol::Cmce,
-            4 => Protocol::Sndcp,
+            4 => return Err(MleError::UnsupportedProtocol(Protocol::Sndcp)),
             5 => return Err(MleError::UnsupportedMlePdu(payload.read(0, 3)? as u8)),
             6 => return Err(MleError::UnsupportedManagement),
             _ => return Err(MleError::InvalidProtocol(raw)),

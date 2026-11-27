@@ -148,10 +148,10 @@ impl MsLlcAdapter {
 
     fn submit(&mut self, mut request: TmaUnitdataReq, service: Service, fcs: bool) -> Result<(), LlcError> {
         let result = self.stage(&mut request, service, fcs);
-        if result.is_err() {
-            if let Some(reporter) = request.tx_reporter {
-                reporter.try_mark_discarded();
-            }
+        if result.is_err()
+            && let Some(reporter) = request.tx_reporter
+        {
+            reporter.try_mark_discarded();
         }
         result
     }

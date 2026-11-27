@@ -484,8 +484,10 @@ pub unsafe extern "C" fn tetra_ms_mm_poll_action(storage: *mut c_void, output: *
             }
             CoreAction::RegistrationSuccess { attached } => {
                 out.kind = REGISTRATION_SUCCESS;
-                out.attached_count = attached.as_slice().len() as u16;
-                out.attached[..attached.as_slice().len()].copy_from_slice(attached.as_slice());
+                out.attached_count = attached.len() as u16;
+                for (output, group) in out.attached.iter_mut().zip(attached.iter()) {
+                    *output = group.gssi;
+                }
             }
             CoreAction::RegistrationFailure { cause } => {
                 out.kind = REGISTRATION_FAILURE;
@@ -507,9 +509,11 @@ pub unsafe extern "C" fn tetra_ms_mm_poll_action(storage: *mut c_void, output: *
                 out.t353_countdown = op.t353_countdown;
                 out.flags =
                     if op.detach_all { ACTION_DETACH_ALL } else { 0 } | if op.report_requested { ACTION_REPORT_REQUESTED } else { 0 };
-                out.attached_count = attached.as_slice().len() as u16;
+                out.attached_count = attached.len() as u16;
                 out.detached_count = detached.as_slice().len() as u16;
-                out.attached[..attached.as_slice().len()].copy_from_slice(attached.as_slice());
+                for (output, group) in out.attached.iter_mut().zip(attached.iter()) {
+                    *output = group.gssi;
+                }
                 out.detached[..detached.as_slice().len()].copy_from_slice(detached.as_slice());
             }
             CoreAction::DetachReport { successful } => {
@@ -678,10 +682,17 @@ mod tests {
     }
 
     fn group_ack(groups: &[u32]) -> Event {
+        group_ack_metadata(groups, 0, 0)
+    }
+
+    fn group_ack_metadata(groups: &[u32], class: u8, lifetime: u8) -> Event {
         let mut payload = PackedBits::new();
         payload.push(6, groups.len() as u32).unwrap();
         for &gssi in groups {
-            payload.push(8, 0).unwrap();
+            payload.push(1, 0).unwrap();
+            payload.push(2, u32::from(lifetime)).unwrap();
+            payload.push(3, u32::from(class)).unwrap();
+            payload.push(2, 0).unwrap();
             payload.push(24, gssi).unwrap();
         }
         let mut bits = PackedBits::new();
@@ -695,6 +706,53 @@ mod tests {
         input.pdu_bits = bits.len();
         input.pdu[..bits.as_bytes().len()].copy_from_slice(bits.as_bytes());
         input
+    }
+
+    #[test]
+    fn v1_c_actions_and_status_never_expose_packed_attachment_metadata() {
+        for class in 0..8 {
+            for lifetime in 0..4 {
+                let mut storage = Storage([0; STORAGE_SIZE as usize]);
+                let pointer = storage.0.as_mut_ptr().cast();
+                let mut activate = event(ACTIVATE);
+                activate.flags = REGISTRATION_REQUIRED | SYSTEM_WIDE_SERVICES;
+                // SAFETY: Storage and every input/output are live, exclusive and disjoint.
+                unsafe {
+                    assert_eq!(tetra_ms_mm_init(pointer, STORAGE_SIZE, &config()), OK);
+                    assert_eq!(tetra_ms_mm_push_event(pointer, &activate), OK);
+                    drain(pointer);
+                    assert_eq!(tetra_ms_mm_push_event(pointer, &downlink("01010110")), OK);
+                    drain(pointer);
+                    let mut groups = event(GROUPS);
+                    groups.group_count = 1;
+                    groups.groups[0] = GroupRequest {
+                        gssi: 0xff_ffff,
+                        operation: 0,
+                        value: class,
+                        reserved: 0,
+                    };
+                    assert_eq!(tetra_ms_mm_push_event(pointer, &groups), OK);
+                    drain(pointer);
+                    assert_eq!(
+                        tetra_ms_mm_push_event(pointer, &group_ack_metadata(&[0xff_ffff], class, lifetime)),
+                        OK
+                    );
+                    let output = drain(pointer);
+                    assert_eq!(output[1].kind, GROUP_CONFIRM);
+                    assert_eq!(output[1].attached_count, 1);
+                    assert_eq!(output[1].attached[0], 0xff_ffff);
+                    assert!(output[1].attached[1..].iter().all(|gssi| *gssi == 0));
+                    let before = status(pointer);
+                    assert_eq!(before.attached[0], 0xff_ffff);
+                    groups.groups[0].value = 8;
+                    assert_eq!(tetra_ms_mm_push_event(pointer, &groups), INVALID_VALUE);
+                    assert_eq!(status(pointer), before);
+                    assert_eq!(tetra_ms_mm_reset(pointer, &config()), OK);
+                    assert_eq!(status(pointer).attached_count, 0);
+                    assert!(drain(pointer).is_empty());
+                }
+            }
+        }
     }
 
     #[test]

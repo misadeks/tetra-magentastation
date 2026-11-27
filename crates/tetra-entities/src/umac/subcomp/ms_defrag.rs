@@ -8,6 +8,12 @@ pub struct MsDefrag {
     core: MsReassembly,
 }
 
+impl Default for MsDefrag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MsDefrag {
     pub fn new() -> Self {
         Self { core: MsReassembly::new() }

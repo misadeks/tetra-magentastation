@@ -183,7 +183,9 @@ struct tetra_ms_mm_status {
  * ISSI; priority and optional detach receipt request are included.
  * IDENTITIES output is the complete sorted unique filter set plus wire-order
  * detached identities. Registration/group confirmations preserve wire-order
- * duplicates. GROUP_CONFIRM flags echo the pending request; t353_countdown is
+ * duplicates. ABI v1 attachment arrays carry plain 24-bit GSSIs only; class and
+ * lifetime metadata are not exposed by this C output (Rust actions retain it).
+ * GROUP_CONFIRM flags echo the pending request; t353_countdown is
  * its remaining timer (zero after expiry). Reject causes are raw five-bit values.
  * Status optional cells and group operation are discriminated by HAS_* flags.
  * De-registration is pending exactly when registration == STATE_DETACHING and

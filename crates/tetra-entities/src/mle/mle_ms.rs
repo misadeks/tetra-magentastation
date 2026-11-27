@@ -10,7 +10,6 @@ use tetra_saps::lcmc::{LcmcMleBreakInd, LcmcMleReopenInd, LcmcMleUnitdataInd};
 use tetra_saps::lmm::{
     LmmMleActivateConf, LmmMleBreakInd, LmmMleReopenInd, LmmMleRssiInd, LmmMleScanCompleteInd, LmmMleScanResultInd, LmmMleUnitdataInd,
 };
-use tetra_saps::ltpd::LtpdMleUnitdataInd;
 use tetra_saps::tla::TlaTlDataReqBl;
 use tetra_saps::tlmc::{TlmcConfigureReq, TlmcTuneReq, TlmcUPlaneConfigureReq, TlmcValidAddress};
 use tetra_saps::{SapMsg, SapMsgInner};
@@ -233,19 +232,10 @@ impl MleMs {
                         chan_change_handle: parameters.channel_change_handle,
                     }),
                 ),
-                // Preserve the established SNDCP SAP destination, including its
-                // current CMCE endpoint, rather than silently changing routing.
-                Protocol::Sndcp => (
-                    Sap::LcmcSap,
-                    SapMsgInner::LtpdMleUnitdataInd(LtpdMleUnitdataInd {
-                        sdu,
-                        received_tetra_address: address,
-                        endpoint_id,
-                        link_id,
-                        chan_change_resp_req: parameters.channel_change_response_required,
-                        chan_change_handle: parameters.channel_change_handle,
-                    }),
-                ),
+                Protocol::Sndcp => {
+                    tracing::warn!("MLE-MS: unsupported SNDCP downlink dropped");
+                    return;
+                }
             };
             queue.push_back(SapMsg {
                 sap,

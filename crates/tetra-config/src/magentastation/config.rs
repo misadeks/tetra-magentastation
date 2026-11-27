@@ -79,6 +79,19 @@ pub struct StackConfig {
 }
 
 impl StackConfig {
+    /// Initial affiliation set shared by startup validation and the MM adapter.
+    pub fn initial_groups(&self) -> Result<tetra_ms_core::mm::GroupSet, &'static str> {
+        let mut groups = tetra_ms_core::mm::GroupSet::new();
+        let base = self.ms.as_ref().map(|ms| ms.attach_groups.as_slice()).unwrap_or_default();
+        for gssi in base.iter().copied().chain(self.codeplug.default_active_scanlist_gssis()) {
+            groups.insert(gssi).map_err(|error| match error {
+                tetra_ms_core::mm::Error::GroupCapacity => "initial affiliation exceeds 63 unique groups",
+                _ => "initial group identity must fit in 24 bits",
+            })?;
+        }
+        Ok(groups)
+    }
+
     /// Validate that all required configuration fields are properly set.
     pub fn validate(&self) -> Result<(), &str> {
         // Check input device settings
@@ -126,6 +139,15 @@ impl StackConfig {
             if ms.subscriber_class < 1 || ms.subscriber_class > 16 {
                 return Err("ms.subscriber_class must be in range 1-16");
             }
+            tetra_ms_core::mm::Config {
+                issi: ms.issi,
+                mcc: self.net.mcc,
+                mnc: self.net.mnc,
+                initial_la: self.cell.location_area,
+            }
+            .validate()
+            .map_err(|_| "MS MCC/MNC/location area exceeds portable wire bounds")?;
+            self.initial_groups()?;
         }
 
         Ok(())

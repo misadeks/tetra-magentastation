@@ -40,13 +40,10 @@ pub struct CurBurst {
 }
 
 pub struct LmacMs {
-    config: SharedConfig,
+    _config: SharedConfig,
 
     /// Retrieved from SYNC frame
     scrambling_code: Option<u32>,
-
-    /// Traffic channels and associated state
-    tchans: [LmacTrafficChan; 64],
 
     /// Timeslot time, provided by upper layer and then maintained in sync here
     ts: Option<TdmaTime>,
@@ -60,9 +57,8 @@ pub struct LmacMs {
 impl LmacMs {
     pub fn new(config: SharedConfig) -> Self {
         Self {
-            config,
+            _config: config,
             scrambling_code: None,
-            tchans: [LmacTrafficChan::default(); 64],
             cur_burst: CurBurst::default(),
 
             ts: None,
@@ -421,6 +417,7 @@ impl LmacMs {
             blk1: Some(type5_blk1),
             blk2: type5_blk2,
             time: Some(ul_time),
+            placement: prim.placement,
             // Carry the reserved/contention distinction down to PhyMs so it can
             // enforce exact-slot transmission for reserved access (cl. 23.5.2.2.2).
             reserved_access: prim.reserved_access,

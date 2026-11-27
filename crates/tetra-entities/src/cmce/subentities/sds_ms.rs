@@ -18,7 +18,7 @@ use tetra_saps::{SapMsg, SapMsgInner};
 
 use crate::MessageQueue;
 use crate::net_telemetry::{TelemetryEvent, channel::TelemetrySink};
-use tetra_ms_core::sds::{SdsCore, SdsEvent};
+use tetra_ms_core::sds::{SdsCore, SdsError, SdsEvent};
 use tetra_ms_types::BitView;
 
 #[path = "cc_ms/sds_adapter.rs"]
@@ -63,7 +63,7 @@ impl SdsMsSubentity {
         let Ok(sdu) = sdu.window(offset, sdu.len().saturating_sub(offset)) else {
             return;
         };
-        adapter::dispatch(
+        let _ = adapter::dispatch(
             &mut self.core,
             self.telemetry.as_ref(),
             queue,
@@ -80,14 +80,15 @@ impl SdsMsSubentity {
 
     /// Send a U-SDS-DATA PDU uplink (cl. 14.7.2.8) — TNSDS-UNITDATA request
     /// (Table 13.3, cl. 13.3.2.3). Mirrors `sds_bs::send_d_sds_data`.
-    pub fn send_u_sds_data(&mut self, queue: &mut MessageQueue, dest_ssi: u32, dest_is_group: bool, user_defined_data: SdsUserData) {
-        let data = match adapter::data_to_core(&user_defined_data) {
-            Ok(data) => data,
-            Err(error) => {
-                tracing::warn!(?error, "invalid SDS user data");
-                return;
-            }
-        };
+    /// Success means local admission, not over-the-air delivery.
+    pub fn send_u_sds_data(
+        &mut self,
+        queue: &mut MessageQueue,
+        dest_ssi: u32,
+        dest_is_group: bool,
+        user_defined_data: SdsUserData,
+    ) -> Result<(), SdsError> {
+        let data = adapter::data_to_core(&user_defined_data)?;
         adapter::dispatch(
             &mut self.core,
             self.telemetry.as_ref(),
@@ -96,12 +97,18 @@ impl SdsMsSubentity {
                 destination: TetraAddress::new(dest_ssi, if dest_is_group { SsiType::Gssi } else { SsiType::Issi }),
                 data: &data,
             },
-        );
+        )
     }
 
     /// Send a U-STATUS PDU uplink (cl. 14.7.2.7) — TNSDS-STATUS request
     /// (Table 13.1, cl. 13.3.2.1). Mirrors `sds_bs::send_d_status`.
-    pub fn send_u_status(&mut self, queue: &mut MessageQueue, dest_ssi: u32, dest_is_group: bool, status_number: u16) {
+    pub fn send_u_status(
+        &mut self,
+        queue: &mut MessageQueue,
+        dest_ssi: u32,
+        dest_is_group: bool,
+        status_number: u16,
+    ) -> Result<(), SdsError> {
         adapter::dispatch(
             &mut self.core,
             self.telemetry.as_ref(),
@@ -110,7 +117,7 @@ impl SdsMsSubentity {
                 destination: TetraAddress::new(dest_ssi, if dest_is_group { SsiType::Gssi } else { SsiType::Issi }),
                 status: status_number,
             },
-        );
+        )
     }
 
     /// TNSDS-UNITDATA request carrying an SDS-TL SDS-TRANSFER (cl. 29.4.2.4).
@@ -118,10 +125,8 @@ impl SdsMsSubentity {
     /// delivery-report request) and sends it as Type-4 user data in a
     /// U-SDS-DATA. When a report is requested the message reference is tracked
     /// (for TNSDS-CANCEL and to correlate the returning report).
-    pub fn send_message(&mut self, queue: &mut MessageQueue, req: &TnsdsMessageRequest) {
-        let Ok(data) = BitView::new(&req.user_data, req.user_data_bits) else {
-            return;
-        };
+    pub fn send_message(&mut self, queue: &mut MessageQueue, req: &TnsdsMessageRequest) -> Result<(), SdsError> {
+        let data = BitView::new(&req.user_data, req.user_data_bits)?;
         adapter::dispatch(
             &mut self.core,
             self.telemetry.as_ref(),
@@ -136,13 +141,13 @@ impl SdsMsSubentity {
                 reference: req.message_reference,
                 data,
             },
-        );
+        )
     }
 
     /// TNSDS-REPORT request (Table 13.2, cl. 13.3.2.2): send an SDS-TL delivery/
     /// read report (SDS-REPORT) for a received message — e.g. a "consumed" report
     /// once the user application reads the message.
-    pub fn send_report(&mut self, queue: &mut MessageQueue, req: &TnsdsReportRequest) {
+    pub fn send_report(&mut self, queue: &mut MessageQueue, req: &TnsdsReportRequest) -> Result<(), SdsError> {
         adapter::dispatch(
             &mut self.core,
             self.telemetry.as_ref(),
@@ -152,7 +157,7 @@ impl SdsMsSubentity {
                 reference: req.message_reference,
                 status: req.delivery_status,
             },
-        );
+        )
     }
 
     /// TNSDS-CANCEL: stop tracking a locally-outstanding SDS-TL message. Returns
@@ -246,7 +251,7 @@ attach_groups = []
         let mut sds = make_sds(None);
         let mut q = MessageQueue::new();
         let payload = SdsUserData::Type4(16, vec![0xAB, 0xCD]);
-        sds.send_u_sds_data(&mut q, 1234, false, payload.clone());
+        sds.send_u_sds_data(&mut q, 1234, false, payload.clone()).unwrap();
 
         let msg = q.pop_front().expect("U-SDS-DATA queued");
         let SapMsgInner::LcmcMleUnitdataReq(mut prim) = msg.msg else {
@@ -268,7 +273,7 @@ attach_groups = []
         let mut sds = make_sds(None);
         let mut q = MessageQueue::new();
         let status = PreCodedStatus::from(0x8002).into_raw();
-        sds.send_u_status(&mut q, 91, true, status);
+        sds.send_u_status(&mut q, 91, true, status).unwrap();
 
         let msg = q.pop_front().expect("U-STATUS queued");
         let SapMsgInner::LcmcMleUnitdataReq(mut prim) = msg.msg else {
@@ -422,7 +427,8 @@ attach_groups = []
                 user_data: vec![0x01, b'H', b'i'],
                 user_data_bits: 24,
             },
-        );
+        )
+        .unwrap();
         let (ssi, ty, len_bits, bytes) = take_type4(q.pop_front().expect("U-SDS-DATA queued"));
         assert_eq!(ssi, 2200699);
         assert!(matches!(ty, SsiType::Issi));
@@ -517,7 +523,8 @@ attach_groups = []
                 user_data: vec![],
                 user_data_bits: 0,
             },
-        );
+        )
+        .unwrap();
         q.pop_front().expect("transfer queued");
         let (len_bits, bytes) = sds_tl::SdsReport {
             protocol_id: sds_tl::PROTOCOL_ID_TEXT_MESSAGING,
@@ -576,7 +583,8 @@ attach_groups = []
                 message_reference: 12,
                 delivery_status: sds_tl::DELIVERY_CONSUMED_BY_DEST,
             },
-        );
+        )
+        .unwrap();
         let (ssi, ty, lb, b) = take_type4(q.pop_front().expect("U-SDS-DATA queued"));
         assert_eq!(ssi, 555);
         assert!(matches!(ty, SsiType::Issi));

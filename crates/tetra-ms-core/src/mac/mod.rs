@@ -820,7 +820,13 @@ impl<R: Copy> Mac<R> {
         }
     }
 
+    /// Returns whether audio was dropped, either on overflow or without a floor.
     pub fn queue_audio(&mut self, frame: BitView<'_>) -> Result<bool, BitError> {
+        // Admission without a floor would survive until a later grant, leaking
+        // speech from the previous transmission into the new one.
+        if !self.uplink_tx_granted {
+            return Ok(true);
+        }
         let frame = SpeechFrame::from_view(frame.window(0, frame.len().min(TCH_S_BITS))?)?;
         Ok(self.uplink_audio.push_drop_oldest(frame).is_some())
     }

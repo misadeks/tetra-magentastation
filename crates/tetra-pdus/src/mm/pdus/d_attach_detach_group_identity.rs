@@ -28,7 +28,7 @@ pub struct DAttachDetachGroupIdentity {
     pub group_report_response: Option<Type3FieldGeneric>,
     /// Type4, See note,
     pub group_identity_downlink: Option<Vec<GroupIdentityDownlink>>,
-    /// Type4, See ETSI EN 300 392-7 [8] and note,
+    /// Type4, See ETSI EN 300 392-7 \[8\] and note,
     pub group_identity_security_related_information: Option<Type4FieldGeneric>,
 }
 

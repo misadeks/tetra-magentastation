@@ -142,7 +142,7 @@ pub fn decode(field: &Type3FieldGeneric) -> Option<DtmfIe> {
     let mut nibbles = Vec::new();
     if dtmf_type == DTMF_TYPE_TONE_START {
         let tail = field.len - 3;
-        if tail == 0 || tail % 4 != 0 || tail / 4 > MAX_DTMF_DIGITS {
+        if tail == 0 || !tail.is_multiple_of(4) || tail / 4 > MAX_DTMF_DIGITS {
             return None;
         }
         for i in 0..tail / 4 {

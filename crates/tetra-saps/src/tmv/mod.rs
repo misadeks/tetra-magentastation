@@ -4,6 +4,15 @@ use tetra_core::{BitBuffer, PhyBlockNum, PhysicalChannel, TdmaTime, Todo};
 
 use crate::tmv::enums::logical_chans::LogicalChannel;
 
+/// Active uplink burst position within a TDMA slot (Table 9.2).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TxBurstPlacement {
+    #[default]
+    FullSlot,
+    Subslot1,
+    Subslot2,
+}
+
 // The TMV-UNITDATA request primitive shall be used to request the lower MAC to transmit a MAC block
 #[derive(Debug, Clone)]
 pub struct TmvUnitdataReq {
@@ -42,6 +51,8 @@ pub struct TmvUnitdataReqSlot {
     /// Timeslot at which this block is to be transmitted
     pub ts: TdmaTime,
     pub ul_phy_chan: PhysicalChannel,
+    /// Full-slot NUB or the explicitly granted CUB subslot.
+    pub placement: TxBurstPlacement,
 
     /// First MAC block in this timeslot. May be received from LLC
     /// If none was received, UMAC auto-generates a SYNC SB1 broadcast block

@@ -49,7 +49,8 @@ impl MacData {
     /// the `fill_bits` flag from the header length and the provided SDU length,
     /// selecting the length-indication form (clears any capacity-request fields).
     /// Returns the number of sub-octet fill bits to append after the SDU. Mirrors
-    /// [`MacResource::update_len_and_fill_ind`] for uplink FACCH/STCH stealing
+    /// [`MacResource::update_len_and_fill_ind`](super::mac_resource::MacResource::update_len_and_fill_ind)
+    /// for uplink FACCH/STCH stealing
     /// (cl. 21.4.3.3 / 23.4.2.2).
     pub fn update_len_and_fill_ind(&mut self, sdu_len: usize) -> usize {
         let hdr_len = self.compute_header_len();
@@ -170,9 +171,9 @@ impl MacData {
         }
 
         // Check if we have a length indication or if we start fragmentation
-        if self.length_ind.is_some() {
+        if let Some(length_ind) = self.length_ind {
             buf.write_bits(0, 1); // length_ind_or_cap_req
-            buf.write_bits(self.length_ind.unwrap() as u64, 6);
+            buf.write_bits(length_ind as u64, 6);
         } else {
             assert!(self.frag_flag.is_some() && self.reservation_req.is_some());
             buf.write_bits(1, 1); // length_ind_or_cap_req

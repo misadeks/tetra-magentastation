@@ -187,6 +187,92 @@ fn private_call_arbitration_and_marker_demultiplexing_are_portable() {
 }
 
 #[test]
+fn interleaved_connect_does_not_consume_another_originations_service() {
+    let mut core = CmceCore::new();
+    let now = TdmaTime::default();
+    core.push_event(now, CmceEvent::Identity(Some(123))).unwrap();
+    for (ssi, communication, duplex) in [(101, 0, true), (202, 1, false)] {
+        core.push_event(
+            now,
+            CmceEvent::Originate {
+                called: route(ssi).main_address,
+                basic: BasicService {
+                    communication,
+                    ..DEFAULT_BASIC
+                },
+                duplex,
+                request_tx: true,
+                hook: false,
+                external: None,
+            },
+        )
+        .unwrap();
+        drain(&mut core);
+    }
+    let proceeding = |id| {
+        let mut pdu = PackedBits::new();
+        for (w, v) in [(5, 1), (14, id), (3, 3), (1, 0), (1, 0), (1, 0)] {
+            push(&mut pdu, w, v);
+        }
+        pdu
+    };
+    receive(&mut core, &proceeding(2), 123).unwrap();
+    drain(&mut core);
+    let mut connect = PackedBits::new();
+    for (w, v) in [(5, 2), (14, 2), (4, 1), (1, 0), (1, 0), (2, 1), (1, 0), (1, 0), (1, 0)] {
+        push(&mut connect, w, v);
+    }
+    receive(&mut core, &connect, 123).unwrap();
+    assert_eq!(core.pending_originations.len(), 1);
+    assert_eq!(core.calls.get(&2).unwrap().kind, MsCallKind::Group);
+    drain(&mut core);
+    receive(&mut core, &proceeding(1), 123).unwrap();
+    assert!(core.pending_originations.is_empty());
+    let a = core.calls.get(&1).unwrap();
+    assert_eq!(a.kind, MsCallKind::Individual);
+    assert!(a.simplex_duplex_selection);
+    assert_eq!(a.basic_service.communication, 0);
+    assert_eq!(core.calls.get(&2).unwrap().basic_service.communication, 1);
+}
+
+#[test]
+fn expired_timer_disconnect_is_one_shot_until_release() {
+    let mut core = CmceCore::new();
+    receive(&mut core, &setup(7, 1, false, 0, Some(456)), 91).unwrap();
+    drain(&mut core);
+    let deadline = core.calls.get(&7).unwrap().timers.call_deadline.unwrap();
+    core.calls.get_mut(&7).unwrap().timers.setup_phase_deadline = Some(deadline);
+    let mut uplinks = 0;
+    for tick in 0..100 {
+        core.push_event(deadline.add_timeslots(tick), CmceEvent::Tick).unwrap();
+        uplinks += drain(&mut core)
+            .iter()
+            .filter(|action| matches!(action, CmceAction::Uplink { .. }))
+            .count();
+    }
+    assert_eq!(uplinks, 1);
+    let call = core.calls.get(&7).unwrap();
+    assert_eq!(call.state, MsCcState::Disconnect);
+    assert!(call.timers.call_deadline.is_none());
+    assert!(call.timers.setup_phase_deadline.is_none());
+}
+
+#[test]
+fn no_grant_and_queued_grant_revoke_previous_transmit_configuration() {
+    for grant in [1, 2] {
+        let mut core = CmceCore::new();
+        receive(&mut core, &setup(7, 1, false, 0, None), 91).unwrap();
+        drain(&mut core);
+        receive(&mut core, &floor(7, grant, None), 91).unwrap();
+        assert!(!core.calls.get(&7).unwrap().accepts_uplink());
+        assert!(
+            drain(&mut core)
+                .iter()
+                .any(|action| matches!(action, CmceAction::Configure { state, .. } if !state.tx_grant))
+        );
+    }
+}
+#[test]
 fn proceeding_connect_and_info_rename_retain_lifo_and_timer_behavior() {
     let mut core = CmceCore::new();
     let now = TdmaTime::default();

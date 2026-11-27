@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use std::time::Duration;
 
 use crate::net_telemetry::events::TelemetryEvent;
@@ -22,7 +22,9 @@ impl TelemetrySink {
     /// Push a telemetry event. Lock‑free. Fire‑and‑forget: silently drops if the receiver is gone.
     #[inline]
     pub fn send(&self, event: TelemetryEvent) {
-        let _ = self.tx.send(event);
+        if self.tx.try_send(event).is_err() {
+            tracing::warn!("Telemetry event rejected: output queue full or closed");
+        }
     }
 }
 
@@ -71,7 +73,7 @@ impl TelemetrySource {
 
 /// Create a linked (sink, source) pair.
 pub fn telemetry_channel() -> (TelemetrySink, TelemetrySource) {
-    let (tx, rx) = unbounded();
+    let (tx, rx) = bounded(256);
     (TelemetrySink { tx }, TelemetrySource { rx })
 }
 

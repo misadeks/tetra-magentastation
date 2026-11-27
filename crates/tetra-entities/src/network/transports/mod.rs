@@ -47,19 +47,6 @@ pub trait NetworkTransport: Send {
     }
 }
 
-/// Factory trait for creating transport instances
-///
-/// Each transport type implements this to define how it gets constructed
-/// from a configuration type. This allows generic workers to create transports
-/// without knowing the specific construction details.
-pub trait TransportFactory: NetworkTransport + Sized {
-    /// Configuration type needed to construct this transport
-    type Config: Send + 'static;
-
-    /// Create a new transport instance from configuration
-    fn create(config: Self::Config) -> Result<Self, NetworkError>;
-}
-
 /// Network address abstraction
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NetworkAddress {

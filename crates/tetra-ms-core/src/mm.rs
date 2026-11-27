@@ -208,6 +208,80 @@ pub struct GroupList {
     len: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupAttachment {
+    pub gssi: u32,
+    pub class_of_usage: u8,
+    pub lifetime: u8,
+}
+
+impl GroupAttachment {
+    const GSSI_MASK: u32 = 0xff_ffff;
+    const CLASS_SHIFT: u32 = 24;
+    const LIFETIME_SHIFT: u32 = 27;
+
+    pub const fn new(gssi: u32, class_of_usage: u8, lifetime: u8) -> Result<Self, Error> {
+        if gssi > Self::GSSI_MASK {
+            return Err(Error::InvalidIdentity);
+        }
+        if class_of_usage > 7 || lifetime > 3 {
+            return Err(Error::InvalidPdu);
+        }
+        Ok(Self {
+            gssi,
+            class_of_usage,
+            lifetime,
+        })
+    }
+
+    fn packed(self) -> u32 {
+        self.gssi | (u32::from(self.class_of_usage) << Self::CLASS_SHIFT) | (u32::from(self.lifetime) << Self::LIFETIME_SHIFT)
+    }
+
+    fn from_packed(packed: u32) -> Self {
+        Self {
+            gssi: packed & Self::GSSI_MASK,
+            class_of_usage: ((packed >> Self::CLASS_SHIFT) & 7) as u8,
+            lifetime: ((packed >> Self::LIFETIME_SHIFT) & 3) as u8,
+        }
+    }
+}
+
+/// Wire-order attachment metadata packed into the unused high bits of each
+/// 24-bit identity, preserving the existing bounded action/storage footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GroupAttachments(GroupList);
+
+impl GroupAttachments {
+    pub const fn new() -> Self {
+        Self(GroupList::new())
+    }
+
+    pub fn from_slice(groups: &[GroupAttachment]) -> Result<Self, Error> {
+        let mut result = Self::new();
+        for group in groups {
+            result.push(group.gssi, group.lifetime, group.class_of_usage)?;
+        }
+        Ok(result)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.as_slice().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = GroupAttachment> + '_ {
+        self.0.iter().copied().map(GroupAttachment::from_packed)
+    }
+
+    fn push(&mut self, gssi: u32, lifetime: u8, class_of_usage: u8) -> Result<(), Error> {
+        self.0.push(GroupAttachment::new(gssi, class_of_usage, lifetime)?.packed())
+    }
+}
+
 impl Default for GroupList {
     fn default() -> Self {
         Self::new()
@@ -294,7 +368,7 @@ pub struct Config {
 }
 
 impl Config {
-    fn validate(self) -> Result<(), Error> {
+    pub fn validate(self) -> Result<(), Error> {
         if self.issi == 0 || self.issi > 0xff_ffff {
             return Err(Error::InvalidIdentity);
         }
@@ -341,7 +415,7 @@ pub enum Action {
     },
     Service(ServiceStatus),
     RegistrationSuccess {
-        attached: GroupList,
+        attached: GroupAttachments,
     },
     RegistrationFailure {
         cause: Option<u8>,
@@ -352,7 +426,7 @@ pub enum Action {
     },
     GroupConfirm {
         op: PendingGroupOp,
-        attached: GroupList,
+        attached: GroupAttachments,
         detached: GroupList,
     },
     DetachReport {
@@ -693,13 +767,13 @@ impl MmCore {
         if self.state.reg_state == RegState::Registered {
             return Ok(());
         }
-        let mut attached = GroupList::new();
+        let mut attached = GroupAttachments::new();
         let mut new_groups = self.state.attached_gssis;
         if let Some(groups) = groups {
             groups.attachments(&mut attached)?;
             new_groups = GroupSet::new();
-            for &gssi in attached.iter() {
-                new_groups.insert(gssi)?;
+            for group in attached.iter() {
+                new_groups.insert(group.gssi)?;
             }
         }
         let post_attach = !new_groups.is_empty() && self.state.pending_group_op.is_none();
@@ -757,22 +831,22 @@ impl MmCore {
     #[inline(never)]
     fn downlink_group_ack(&mut self, groups: &wire::GroupElements<'_>) -> Result<(), Error> {
         let Some(op) = self.state.pending_group_op else { return Ok(()) };
-        let mut attached = GroupList::new();
+        let mut attached = GroupAttachments::new();
         let mut detached = GroupList::new();
         groups.collect(&mut attached, &mut detached)?;
         let mut next = self.state.attached_gssis;
         if op.detach_all {
             next = GroupSet::new();
-            for &gssi in attached.iter() {
-                next.insert(gssi)?;
+            for group in attached.iter() {
+                next.insert(group.gssi)?;
             }
         } else {
             for gssi in detached.iter() {
                 next.remove(gssi);
             }
-            for &gssi in attached.iter() {
-                if !detached.as_slice().contains(&gssi) {
-                    next.insert(gssi)?;
+            for group in attached.iter() {
+                if !detached.as_slice().contains(&group.gssi) {
+                    next.insert(group.gssi)?;
                 }
             }
         }
@@ -801,12 +875,12 @@ impl MmCore {
     }
 
     #[inline(never)]
-    fn queue_registration_success(&mut self, attached: &GroupList) {
+    fn queue_registration_success(&mut self, attached: &GroupAttachments) {
         self.actions.push(Action::RegistrationSuccess { attached: *attached });
     }
 
     #[inline(never)]
-    fn queue_group_confirm(&mut self, op: PendingGroupOp, attached: &GroupList, detached: &GroupList) {
+    fn queue_group_confirm(&mut self, op: PendingGroupOp, attached: &GroupAttachments, detached: &GroupList) {
         self.actions.push(Action::GroupConfirm {
             op,
             attached: *attached,
@@ -901,7 +975,7 @@ impl MmCore {
                 self.state.pending_group_op = None;
                 self.actions.push(Action::GroupConfirm {
                     op,
-                    attached: GroupList::new(),
+                    attached: GroupAttachments::new(),
                     detached: GroupList::new(),
                 });
             }

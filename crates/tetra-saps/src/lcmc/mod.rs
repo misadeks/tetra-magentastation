@@ -89,7 +89,7 @@ pub struct LcmcMleDisableInd {
 }
 
 /// MLE-ENABLE indication: this primitive shall be used by the MLE entity to instruct the CMCE entity to recover from
-/// the tamporarily [sic] disabled state.
+/// the temporarily disabled state.
 #[derive(Debug, Clone)]
 pub struct LcmcMleEnableInd {}
 

@@ -12,6 +12,10 @@ use super::subentities::cc_ms::CcMsSubentity;
 use super::subentities::sds_ms::SdsMsSubentity;
 use super::subentities::ss_ms::SsMsSubentity;
 
+#[cfg(test)]
+#[path = "cmce_ms_tests.rs"]
+mod tests;
+
 /// Maximum valid 24-bit SSI (ETSI TS 100 392-2 cl. 7). A called/destination SSI
 /// outside `1..=MAX_SSI` cannot be encoded into a Called party SSI element
 /// (cl. 14.8.28) — attempting it panics the PDU serialiser — so such a value is
@@ -29,7 +33,6 @@ pub struct CmceMs {
     sds: SdsMsSubentity,
     cc: CcMsSubentity,
     ss: SsMsSubentity,
-    telemetry: Option<TelemetrySink>,
     control: Option<ControlEndpoint>,
 }
 
@@ -40,7 +43,6 @@ impl CmceMs {
             sds: SdsMsSubentity::new(config.clone(), telemetry.clone()),
             cc: CcMsSubentity::new_with_config(config.clone(), telemetry.clone()),
             ss: SsMsSubentity::new(),
-            telemetry,
             control,
         }
     }
@@ -50,7 +52,8 @@ impl CmceMs {
 
         // Handle the incoming unit data indication
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
-            panic!();
+            tracing::warn!("CMCE-MS: unsupported unitdata primitive dropped");
+            return;
         };
         let Some(bits) = prim.sdu.peek_bits(5) else {
             tracing::warn!("insufficient bits: {}", prim.sdu.dump_bin());
@@ -84,9 +87,7 @@ impl CmceMs {
             | CmcePduTypeDl::DTxWait => {
                 self.cc.route_rd_deliver(queue, message);
             }
-            _ => {
-                panic!();
-            }
+            _ => tracing::warn!(?pdu_type, "CMCE-MS: unsupported PDU dropped"),
         }
     }
 
@@ -114,6 +115,12 @@ impl CmceMs {
 
     fn tnsds_ack(&self, handle: u32, accepted: bool, detail: Option<String>) {
         self.respond(ControlResponse::TnsdsAck { handle, accepted, detail });
+    }
+    fn tnsds_admission(&self, handle: u32, result: Result<(), tetra_ms_core::sds::SdsError>) {
+        match result {
+            Ok(()) => self.tnsds_ack(handle, true, None),
+            Err(error) => self.tnsds_ack(handle, false, Some(format!("SDS admission rejected: {error:?}"))),
+        }
     }
 
     fn handle_control_command(&mut self, queue: &mut MessageQueue, cmd: ControlCommand) {
@@ -209,9 +216,10 @@ impl CmceMs {
                         )),
                     );
                 } else {
-                    self.sds
-                        .send_u_sds_data(queue, request.called_party_ssi, request.called_party_is_group, request.user_data);
-                    self.tnsds_ack(handle, true, None);
+                    let result =
+                        self.sds
+                            .send_u_sds_data(queue, request.called_party_ssi, request.called_party_is_group, request.user_data);
+                    self.tnsds_admission(handle, result);
                 }
             }
             // TNSDS-STATUS request (Table 13.1, cl. 13.3.2.1): send a pre-coded
@@ -227,13 +235,13 @@ impl CmceMs {
                         )),
                     );
                 } else {
-                    self.sds.send_u_status(
+                    let result = self.sds.send_u_status(
                         queue,
                         request.called_party_ssi,
                         request.called_party_is_group,
                         request.status_number,
                     );
-                    self.tnsds_ack(handle, true, None);
+                    self.tnsds_admission(handle, result);
                 }
             }
             // TNSDS-UNITDATA request carrying an SDS-TL SDS-TRANSFER (cl. 29.4.2.4):
@@ -249,8 +257,8 @@ impl CmceMs {
                         )),
                     );
                 } else {
-                    self.sds.send_message(queue, &request);
-                    self.tnsds_ack(handle, true, None);
+                    let result = self.sds.send_message(queue, &request);
+                    self.tnsds_admission(handle, result);
                 }
             }
             // TNSDS-REPORT request (Table 13.2, cl. 13.3.2.2): send an SDS-TL
@@ -266,8 +274,8 @@ impl CmceMs {
                         )),
                     );
                 } else {
-                    self.sds.send_report(queue, &request);
-                    self.tnsds_ack(handle, true, None);
+                    let result = self.sds.send_report(queue, &request);
+                    self.tnsds_admission(handle, result);
                 }
             }
             // TNSDS-CANCEL: stop tracking a locally-outstanding SDS-TL message.
@@ -349,7 +357,7 @@ impl CmceMs {
                 self.cc.handle_reopen(queue);
             }
             _ => {
-                panic!();
+                tracing::warn!("CMCE-MS: unsupported LCMC primitive dropped");
             }
         }
     }

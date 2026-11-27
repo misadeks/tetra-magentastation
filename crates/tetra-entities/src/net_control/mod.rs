@@ -1,8 +1,8 @@
 //! External networked command component
 //!
-//! Runs outside the real-time core in its own thread. Receives [`Command`]s
+//! Runs outside the real-time core in its own thread. Receives [`ControlCommand`]s
 //! from a remote server via a pluggable network transport, forwards them
-//! toward the stack through a [`CommandSink`], and sends [`CommandResponse`]s
+//! toward the stack through a [`CommandDispatcher`], and sends [`ControlResponse`]s
 //! back to the server.
 
 pub mod channel;

@@ -13,7 +13,7 @@
 //!
 //! Control blocks contain at most 268 type-1 bits, 288 type-2 bits and 432
 //! coded bits. TCH/S uses 274 codec bits and 432 coded bits. Decoding requires
-//! an explicit reusable [`errorcontrol::Workspace`] (2,880 bytes, alignment 2).
+//! an explicit reusable [`errorcontrol::Workspace`] (2,880 bytes, alignment 4).
 //! Put it in caller/core-owned static storage on constrained targets; initialize
 //! once with its const constructor. For runtime-owned uninitialized storage,
 //! use its in-place `initialize` method: constructing the multi-field workspace
@@ -25,7 +25,7 @@
 //! A rate-1/N decoder stores 16*N bytes of polynomial lookup data. Its
 //! caller-owned output and traceback require respectively one byte and two
 //! bytes per decoded bit. [`viterbi::Workspace`] owns only the two-byte-per-bit
-//! traceback, and [`viterbi::Sb1Workspace`] is 1,728 bytes with alignment 2.
+//! traceback, and [`viterbi::Sb1Workspace`] is 1,728 bytes with alignment 4.
 //! [`viterbi::dec_sb1_with_workspace`] supports at most 864 decoded bits, requires
 //! caller-owned workspace and converts hard bits during metric calculation,
 //! without a soft-bit array. No portable decoding API implicitly constructs

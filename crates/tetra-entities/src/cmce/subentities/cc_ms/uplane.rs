@@ -12,27 +12,6 @@ impl CcMsSubentity {
         self.core.apply_grant(id, grant as u8, speaker).expect("fixture grant");
         self.drain_actions(queue);
     }
-    #[cfg(test)]
-    pub(super) fn configure_uplane(
-        &mut self,
-        queue: &mut MessageQueue,
-        id: u16,
-        switch_u_plane: bool,
-        tx_grant: bool,
-        simplex_duplex: bool,
-    ) {
-        self.core
-            .configure(
-                id,
-                MsUPlaneState {
-                    switch_u_plane,
-                    tx_grant,
-                    simplex_duplex,
-                },
-            )
-            .expect("fixture configure");
-        self.drain_actions(queue);
-    }
     pub fn rx_downlink_traffic(&mut self, ts: u8, bfi: bool, _usage_marker: Option<u8>, owner: Option<u32>, data: &[u8]) {
         let Some(speech) = self.core.receive_traffic(owner) else { return };
         self.emit(TelemetryEvent::MsSpeechFrame {
@@ -74,7 +53,7 @@ impl CcMsSubentity {
 pub(super) const UPLINK_SOURCE_MAX_FRAMES: usize = 4;
 const TCH_S_TYPE1_BITS: usize = 274;
 fn pack_tch_s_type1(frame_bits: u16, data: &[u8]) -> Option<Vec<u8>> {
-    const PACKED_BYTES: usize = (TCH_S_TYPE1_BITS + 7) / 8;
+    const PACKED_BYTES: usize = TCH_S_TYPE1_BITS.div_ceil(8);
     if data.len() == PACKED_BYTES {
         return Some(data.to_vec());
     }

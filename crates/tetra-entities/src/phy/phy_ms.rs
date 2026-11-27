@@ -1,7 +1,7 @@
 use tetra_config::magentastation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, BurstType, PhyBlockNum, PhyBlockType, Sap, TdmaTime, TrainingSequence};
-use tetra_pdus::phy::traits::rxtx_dev::{RfPath, RxBurstBits, RxTxDev, TxSlotBits};
+use tetra_pdus::phy::traits::rxtx_dev::{RfPath, RxBurstBits, RxTxDev, TxBurstPlacement, TxSlotBits};
 use tetra_saps::tlmb::{TlmbMonitorInd, TlmbScanDwellInd};
 use tetra_saps::tp::TpUnitdataInd;
 use tetra_saps::{SapMsg, SapMsgInner};
@@ -57,6 +57,7 @@ struct PendingTx {
     time: TdmaTime,
     /// Uplink burst modulation bits (NUB or CUB).
     burst: Vec<u8>,
+    placement: TxBurstPlacement,
 }
 
 /// MS-mode physical layer.
@@ -69,8 +70,7 @@ struct PendingTx {
 /// blocks (Clause 9.4.4.2.5/9.4.4.2.6) and
 /// forwarded to [`crate::lmac::lmac_ms::LmacMs`] as `TpUnitdataInd`.
 pub struct PhyMs<D: RxTxDev> {
-    #[allow(dead_code)]
-    config: SharedConfig,
+    _config: SharedConfig,
 
     /// Downlink TDMA time, recovered from the received burst timing (a relative
     /// slot count until the BSCH content is decoded in a later phase).
@@ -118,7 +118,7 @@ pub struct PhyMs<D: RxTxDev> {
 impl<D: RxTxDev> PhyMs<D> {
     pub fn new(config: SharedConfig, rxtxdev: D) -> Self {
         Self {
-            config,
+            _config: config,
             dltime: TdmaTime::default(),
             synced: false,
             slots_without_burst: 0,
@@ -377,7 +377,11 @@ impl<D: RxTxDev> PhyMs<D> {
             other => panic!("PhyMs: unsupported uplink burst type {:?}", other),
         };
 
-        PendingTx { time, burst }
+        PendingTx {
+            time,
+            burst,
+            placement: prim.placement,
+        }
     }
 }
 
@@ -478,8 +482,16 @@ impl<D: RxTxDev + Send + 'static> TetraEntityTrait for PhyMs<D> {
                     // the TX carrier has been established.
                     SapMsgInner::TpcTxTuneReq(prim) => {
                         tracing::info!("PhyMs: retuning uplink to {} Hz (TPC-TX-TUNE)", prim.carrier_hz);
-                        self.rxtxdev.set_tx_frequency(prim.carrier_hz as f64);
-                        self.tx_frequency_set = true;
+                        self.tx_frequency_set = false;
+                        self.pending_tx = None;
+                        if self.tx_path_active {
+                            self.rxtxdev.set_rf_path(RfPath::Rx);
+                            self.tx_path_active = false;
+                        }
+                        match self.rxtxdev.set_tx_frequency(prim.carrier_hz as f64) {
+                            Ok(()) => self.tx_frequency_set = true,
+                            Err(error) => tracing::error!(?error, "PhyMs: uplink retune rejected; TX disabled"),
+                        }
                     }
                     other => {
                         tracing::warn!("PhyMs TpcSap: unhandled primitive {}", other);
@@ -517,7 +529,7 @@ impl<D: RxTxDev + Send + 'static> TetraEntityTrait for PhyMs<D> {
                 Some(pending) => vec![TxSlotBits {
                     time: pending.time,
                     slot: Some(&pending.burst),
-                    ..Default::default()
+                    placement: pending.placement,
                 }],
                 None => Vec::new(),
             };
@@ -709,6 +721,8 @@ attach_groups = []
         /// Uplink carrier frequencies (Hz) the PHY asked the radio to retune the
         /// transmitter to, in the order requested via `set_tx_frequency`.
         tx_retunes: Vec<f64>,
+        reject_tx_retune: bool,
+        tx_placements: Vec<TxBurstPlacement>,
         /// When true, `rxtx_timeslot` returns no demodulated slot at all
         /// (models `Mode::DlUnsynchronized` on an empty carrier), so `drive_rx`
         /// returns `None` — used to exercise the scan-dwell heartbeat.
@@ -719,6 +733,7 @@ attach_groups = []
         fn rxtx_timeslot(&mut self, tx_slot: &[TxSlotBits]) -> Result<Vec<Option<RxSlotBits<'_>>>, RxTxDevError> {
             let record = tx_slot.first().map(|s| (s.time, s.slot.map(<[u8]>::to_vec).unwrap_or_default()));
             self.tx_calls.push(record);
+            self.tx_placements.extend(tx_slot.iter().map(|s| s.placement));
 
             // Model an un-synchronized empty carrier: no slot demodulated, so
             // drive_rx recovers no time and returns None.
@@ -758,8 +773,13 @@ attach_groups = []
             self.rx_retunes.push(carrier_hz);
         }
 
-        fn set_tx_frequency(&mut self, carrier_hz: f64) {
+        fn set_tx_frequency(&mut self, carrier_hz: f64) -> Result<(), RxTxDevError> {
             self.tx_retunes.push(carrier_hz);
+            if self.reject_tx_retune {
+                Err(RxTxDevError::TxTuneError)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -829,6 +849,64 @@ attach_groups = []
         assert!(phy.tx_frequency_set, "TX carrier marked established after retune");
     }
 
+    #[test]
+    fn rejected_tx_retune_disables_initial_and_stale_readiness() {
+        for previously_ready in [false, true] {
+            let mut phy = phy_ms(MockRxTx {
+                reject_tx_retune: true,
+                ..Default::default()
+            });
+            phy.tx_frequency_set = previously_ready;
+            let mut queue = MessageQueue::new();
+            let ul_time = TdmaTime::default().add_timeslots(2);
+            if previously_ready {
+                phy.rx_prim(&mut queue, cub_uplink_req(ul_time, false));
+                phy.drive_rx(&mut queue);
+                assert!(phy.pending_tx.is_some());
+                assert!(phy.tx_path_active);
+            }
+            let tune = || SapMsg {
+                sap: Sap::TpcSap,
+                src: TetraEntity::Lmac,
+                dest: TetraEntity::Phy,
+                msg: SapMsgInner::TpcTxTuneReq(tetra_saps::tpc::TpcTxTuneReq { carrier_hz: 430_425_000 }),
+            };
+            phy.rx_prim(&mut queue, tune());
+            assert!(!phy.tx_frequency_set);
+            assert!(phy.pending_tx.is_none());
+            assert!(!phy.tx_path_active);
+            phy.rx_prim(&mut queue, cub_uplink_req(ul_time, false));
+            phy.drive_rx(&mut queue);
+            assert!(phy.rxtxdev.tx_calls.last().unwrap().is_none(), "no RF burst after rejection");
+            if previously_ready {
+                assert_eq!(phy.rxtxdev.rf_path, [RfPath::Tx, RfPath::Rx]);
+            }
+
+            phy.rxtxdev.reject_tx_retune = false;
+            phy.rx_prim(&mut queue, tune());
+            phy.rx_prim(&mut queue, cub_uplink_req(ul_time, false));
+            assert!(phy.tx_frequency_set);
+            assert!(phy.pending_tx.is_some(), "successful retry re-enables TX");
+        }
+    }
+
+    #[test]
+    fn second_subslot_reaches_device_with_local_slot_time() {
+        let mut phy = phy_ms(MockRxTx::default());
+        phy.tx_frequency_set = true;
+        phy.dltime = TdmaTime::from_int(10);
+        let mut req = cub_uplink_req(TdmaTime::from_int(800), false);
+        let SapMsgInner::TpUnitdataReq(ref mut prim) = req.msg else {
+            panic!()
+        };
+        prim.placement = TxBurstPlacement::Subslot2;
+        let mut queue = MessageQueue::new();
+        phy.rx_prim(&mut queue, req);
+        phy.drive_rx(&mut queue);
+        assert_eq!(phy.rxtxdev.tx_placements, [TxBurstPlacement::Subslot2]);
+        assert_eq!(phy.rxtxdev.tx_calls[0].as_ref().unwrap().0, TdmaTime::from_int(12));
+    }
+
     /// Safety guard: an uplink burst requested before the TX carrier has been
     /// derived from SYSINFO is dropped (not transmitted on the provisional
     /// centre), so no energy is keyed on the wrong frequency.
@@ -865,6 +943,7 @@ attach_groups = []
                 blk1: Some(type5),
                 blk2: None,
                 time: Some(time),
+                placement: TxBurstPlacement::Subslot1,
                 reserved_access: reserved,
             }),
         }

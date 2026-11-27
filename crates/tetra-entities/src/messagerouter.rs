@@ -19,6 +19,12 @@ pub struct MessageQueue {
     messages: VecDeque<SapMsg>,
 }
 
+impl Default for MessageQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MessageQueue {
     pub fn new() -> Self {
         Self { messages: VecDeque::new() }
@@ -246,29 +252,29 @@ impl MessageRouter {
 
         loop {
             // Check if we've been asked to stop (e.g. Ctrl+C)
-            if let Some(ref flag) = running {
-                if !flag.load(Ordering::Relaxed) {
-                    if !detaching {
-                        // First time we see the stop signal: try to de-register.
-                        // If the MS is registered this sends a U-ITSI DETACH
-                        // (cl. 16.6.1) and we keep running to transmit it;
-                        // otherwise stop immediately.
-                        if self.begin_deregistration() {
-                            eprintln!("\n[INFO] De-registering (ITSI detach) before shutdown...");
-                            detaching = true;
-                        } else {
-                            eprintln!("\n[INFO] Shutting down gracefully...");
-                            break;
-                        }
-                    } else if !self.deregistration_pending() || detach_iters >= MAX_DETACH_ITERS {
-                        // Detach has had time to be transmitted (or the drain hit
-                        // its hard cap); stop now.
-                        eprintln!("\n[INFO] De-registration sent; shutting down gracefully...");
+            if let Some(ref flag) = running
+                && !flag.load(Ordering::Relaxed)
+            {
+                if !detaching {
+                    // First time we see the stop signal: try to de-register.
+                    // If the MS is registered this sends a U-ITSI DETACH
+                    // (cl. 16.6.1) and we keep running to transmit it;
+                    // otherwise stop immediately.
+                    if self.begin_deregistration() {
+                        eprintln!("\n[INFO] De-registering (ITSI detach) before shutdown...");
+                        detaching = true;
+                    } else {
+                        eprintln!("\n[INFO] Shutting down gracefully...");
                         break;
                     }
-                    // else: still draining — fall through and keep running.
-                    detach_iters += 1;
+                } else if !self.deregistration_pending() || detach_iters >= MAX_DETACH_ITERS {
+                    // Detach has had time to be transmitted (or the drain hit
+                    // its hard cap); stop now.
+                    eprintln!("\n[INFO] De-registration sent; shutting down gracefully...");
+                    break;
                 }
+                // else: still draining — fall through and keep running.
+                detach_iters += 1;
             }
 
             // Block on the downlink until the PHY produces a demodulated slot.
@@ -315,10 +321,10 @@ impl MessageRouter {
 
                 // Check if we should stop
                 ticks += 1;
-                if let Some(num_ticks) = num_ticks {
-                    if ticks >= num_ticks {
-                        break;
-                    }
+                if let Some(num_ticks) = num_ticks
+                    && ticks >= num_ticks
+                {
+                    break;
                 }
             }
         }

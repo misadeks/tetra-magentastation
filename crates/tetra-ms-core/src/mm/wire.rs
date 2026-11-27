@@ -1,6 +1,9 @@
 //! MM wire layouts shared with the application PDU representations.
 
-use super::{Config, Error, GROUP_CLASS_OF_USAGE, GroupList, GroupOperation, GroupRequest, GroupSet, LocationUpdateType, MAX_GROUPS};
+use super::{
+    Config, Error, GROUP_CLASS_OF_USAGE, GroupAttachments, GroupList, GroupOperation, GroupRequest, GroupSet, LocationUpdateType,
+    MAX_GROUPS,
+};
 use tetra_ms_types::bits::{BitView, PackedBits};
 
 pub(super) enum Downlink<'a> {
@@ -33,25 +36,36 @@ impl<'a> GroupElements<'a> {
 
     fn parse(element: Reader<'a>) -> Result<Self, Error> {
         let groups = Self { bits: Some(element.bits) };
-        groups.visit(|_, _| Ok(()))?;
+        groups.visit(|_, _, _, _| Ok(()))?;
         Ok(groups)
     }
 
-    pub(super) fn attachments(&self, attached: &mut GroupList) -> Result<(), Error> {
-        self.visit(|detachment, gssi| if detachment { Ok(()) } else { attached.push(gssi) })
+    pub(super) fn attachments(&self, attached: &mut GroupAttachments) -> Result<(), Error> {
+        self.visit(|detachment, gssi, lifetime, class| if detachment { Ok(()) } else { attached.push(gssi, lifetime, class) })
     }
 
-    pub(super) fn collect(&self, attached: &mut GroupList, detached: &mut GroupList) -> Result<(), Error> {
-        self.visit(|detachment, gssi| if detachment { detached.push(gssi) } else { attached.push(gssi) })
+    pub(super) fn collect(&self, attached: &mut GroupAttachments, detached: &mut GroupList) -> Result<(), Error> {
+        self.visit(|detachment, gssi, lifetime, class| {
+            if detachment {
+                detached.push(gssi)
+            } else {
+                attached.push(gssi, lifetime, class)
+            }
+        })
     }
 
-    fn visit(&self, mut consume: impl FnMut(bool, u32) -> Result<(), Error>) -> Result<(), Error> {
+    fn visit(&self, mut consume: impl FnMut(bool, u32, u8, u8) -> Result<(), Error>) -> Result<(), Error> {
         let Some(bits) = self.bits else { return Ok(()) };
         let mut element = Reader::new(bits);
         let count = element.read(6)?;
         for _ in 0..count {
             let detachment = element.read(1)? != 0;
-            element.skip(if detachment { 2 } else { 5 })?;
+            let (lifetime, class) = if detachment {
+                element.skip(2)?;
+                (0, 0)
+            } else {
+                (element.read(2)? as u8, element.read(3)? as u8)
+            };
             let address_type = element.read(2)?;
             let gssi = if address_type != 2 { Some(element.read(24)?) } else { None };
             if address_type == 1 || address_type == 3 {
@@ -61,7 +75,7 @@ impl<'a> GroupElements<'a> {
                 element.skip(24)?;
             }
             if let Some(gssi) = gssi {
-                consume(detachment, gssi)?;
+                consume(detachment, gssi, lifetime, class)?;
             }
         }
         element.exact_end()

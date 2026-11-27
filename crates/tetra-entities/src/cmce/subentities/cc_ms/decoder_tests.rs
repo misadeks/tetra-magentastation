@@ -205,3 +205,265 @@ fn desktop_audio_sidecar_follows_portable_rekey_and_cleanup_actions() {
     assert!(cc.audio.is_empty());
     assert_eq!(cc.call_count(), 0);
 }
+
+#[test]
+fn denied_wire_permission_is_negative_telemetry_and_gates_demand() {
+    use crate::net_telemetry::channel::telemetry_channel;
+    use tetra_ms_core::cmce::CmceEvent;
+    for kind in [7, 2, 3, 9, 10, 11, 12, 13] {
+        for denied in [false, true] {
+            let (sink, rx) = telemetry_channel();
+            let mut cc = CcMsSubentity::new(Some(sink));
+            cc.own_issi = Some(123);
+            let mut queue = MessageQueue::new();
+            let route = CallRoute {
+                main_address: TetraAddress::new(91, SsiType::Gssi),
+                handle: 0,
+                endpoint_id: 0,
+                link_id: 0,
+            };
+            if kind != 7 {
+                assert!(cc.dispatch(
+                    &mut queue,
+                    CmceEvent::Downlink {
+                        sdu: minimum(7).view(),
+                        route
+                    }
+                ));
+            }
+            while rx.try_recv().is_some() {}
+            queue = MessageQueue::new();
+            let mut bits = minimum(kind);
+            let permission_offset = match kind {
+                7 => 35,
+                2 => 27,
+                3 => 25,
+                9 | 12 => 19,
+                10 => 20,
+                11 | 13 => 21,
+                _ => unreachable!(),
+            };
+            bits.view_mut().write(permission_offset, 1, u32::from(denied)).unwrap();
+            assert!(cc.dispatch(&mut queue, CmceEvent::Downlink { sdu: bits.view(), route }));
+            let permission = std::iter::from_fn(|| rx.try_recv())
+                .find_map(|event| match event {
+                    TelemetryEvent::TnccSetupIndication { indication, .. } => Some(indication.transmission_request_permission),
+                    TelemetryEvent::TnccSetupConfirm { confirm, .. } => Some(confirm.transmission_request_permission),
+                    TelemetryEvent::TnccCompleteConfirm { confirm, .. } => Some(confirm.transmission_request_permission),
+                    TelemetryEvent::TnccTxConfirm { confirm, .. } => Some(confirm.transmit_request_permission),
+                    TelemetryEvent::TnccTxIndication { indication, .. } => Some(indication.transmit_request_permission),
+                    _ => None,
+                })
+                .expect("TNCC permission indication");
+            assert_eq!(
+                permission,
+                if denied {
+                    tncc::TransmissionRequestPermission::NotAllowedToRequestForTransmission
+                } else {
+                    tncc::TransmissionRequestPermission::AllowedToRequestForTransmission
+                }
+            );
+            queue = MessageQueue::new();
+            let before = cc.call(0x1234).unwrap().status();
+            assert_eq!(cc.dispatch(&mut queue, CmceEvent::Demand { id: 0x1234, priority: 0 }), !denied);
+            if denied {
+                assert_eq!(cc.call(0x1234).unwrap().status(), before);
+                assert!(queue.iter().next().is_none());
+            } else {
+                assert!(cc.call(0x1234).unwrap().pending_tx_request);
+                assert_eq!(queue.iter().count(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn floor_loss_flushes_host_and_mac_audio_before_regrant() {
+    use tetra_ms_core::cmce::CmceEvent;
+    use tetra_ms_core::mac::Mac;
+
+    fn bridge(queue: &mut MessageQueue, mac: &mut Mac<u32>) {
+        while let Some(message) = queue.pop_front() {
+            match message.msg {
+                SapMsgInner::LcmcMleConfigureReq(config) => mac.configure_uplane(config.switch_u_plane, config.tx_grant),
+                SapMsgInner::TmdCircuitDataReq(frame) => {
+                    mac.queue_audio(BitView::new(&frame.data, 274).unwrap()).unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
+    for loss in 0..8 {
+        let mut cc = CcMsSubentity::new(None);
+        cc.own_issi = Some(123);
+        let mut queue = MessageQueue::new();
+        let route = CallRoute {
+            main_address: TetraAddress::new(91, SsiType::Gssi),
+            handle: 0,
+            endpoint_id: 0,
+            link_id: 0,
+        };
+        assert!(cc.dispatch(
+            &mut queue,
+            CmceEvent::Downlink {
+                sdu: minimum(7).view(),
+                route
+            }
+        ));
+        cc.apply_transmission_grant(&mut queue, 0x1234, TransmissionGrant::Granted, None);
+        let mut mac = Mac::<u32> {
+            scrambling_code: Some(123),
+            assigned_traffic_slots: [true; 4],
+            ..Mac::default()
+        };
+        bridge(&mut queue, &mut mac);
+        cc.push_uplink_speech(0x1234, 274, &[1; 274]);
+        cc.push_uplink_speech(0x1234, 274, &[1; 274]);
+        cc.drive_uplink_source(&mut queue);
+        bridge(&mut queue, &mut mac);
+        assert_eq!(mac.uplink_audio.len(), 1);
+        assert_eq!(cc.audio.get(&0x1234).unwrap().frames.len(), 1);
+        let mut pdu = minimum(if loss == 4 { 13 } else { 11 });
+        if loss >= 5 {
+            pdu.view_mut().write(19, 2, if loss == 5 { 3 } else { loss - 5 }).unwrap();
+        }
+        let event = match loss {
+            0 => CmceEvent::Cease { id: 0x1234 },
+            1 => CmceEvent::Break,
+            2 => CmceEvent::Disconnect { id: 0x1234, cause: 0 },
+            3 => CmceEvent::Release { id: 0x1234, cause: 0 },
+            _ => CmceEvent::Downlink { sdu: pdu.view(), route },
+        };
+        assert!(cc.dispatch(&mut queue, event));
+        bridge(&mut queue, &mut mac);
+        assert!(cc.audio.is_empty(), "host flush, loss {loss}");
+        assert!(mac.uplink_audio.is_empty(), "MAC flush, loss {loss}");
+        assert!(
+            mac.queue_audio(BitView::new(&[0xff; 35], 274).unwrap()).unwrap(),
+            "late speech dropped"
+        );
+        cc.apply_transmission_grant(&mut queue, 0x1234, TransmissionGrant::Granted, None);
+        bridge(&mut queue, &mut mac);
+        cc.drive_uplink_source(&mut queue);
+        bridge(&mut queue, &mut mac);
+        let burst = mac.traffic().expect("granted slot");
+        assert_eq!(burst.speech.view().read(0, 32), Ok(0), "no old speech after loss {loss}");
+        cc.push_uplink_speech(0x1234, 274, &[1; 274]);
+        cc.drive_uplink_source(&mut queue);
+        bridge(&mut queue, &mut mac);
+        assert_eq!(mac.traffic().unwrap().speech.view().read(0, 32), Ok(u32::MAX));
+    }
+}
+
+#[test]
+fn mac_fragment_fill_matches_independent_uplink_pdu_decoders() {
+    use tetra_ms_core::mac::wire;
+    use tetra_pdus::umac::pdus::{mac_end_ul::MacEndUl, mac_frag_ul::MacFragUl};
+    let bytes = [0xa5; 204];
+    for len in 311..=1630 {
+        let source = BitView::new(&bytes, len).unwrap();
+        let (_, remainder, kind) = wire::access_fragment(123, source).unwrap();
+        let wire::FragEndKind::MacFragUl { total_slots } = kind else {
+            panic!("full slot plan");
+        };
+        let plan = wire::FragmentBlocks::build(remainder.view(), total_slots).unwrap();
+        let mut recovered = tetra_ms_types::FragmentBits::new();
+        for (index, block) in plan.as_slice().iter().enumerate() {
+            let mut bits = buffer(block.view());
+            let last = index + 1 == usize::from(total_slots);
+            let (fill, end) = if last {
+                let pdu = MacEndUl::from_bitbuf(&mut bits).unwrap();
+                (pdu.fill_bits, usize::from(pdu.length_ind.unwrap()) * 8)
+            } else {
+                let pdu = MacFragUl::from_bitbuf(&mut bits).unwrap();
+                (pdu.fill_bits, 268)
+            };
+            let header = bits.get_pos();
+            let mut stop = end;
+            if fill {
+                while block.view().read((stop - 1) as u16, 1).unwrap() == 0 {
+                    stop -= 1;
+                }
+                stop -= 1;
+            }
+            recovered
+                .append(block.view().window(header as u16, (stop - header) as u16).unwrap())
+                .unwrap();
+        }
+        assert_eq!(recovered, remainder, "SDU {len}");
+    }
+}
+
+#[test]
+fn clearing_deadline_does_not_grow_the_llc_adapter_queue_each_tick() {
+    use tetra_ms_core::cmce::CmceEvent;
+    let mut cc = CcMsSubentity::new(None);
+    let mut queue = MessageQueue::new();
+    let route = CallRoute {
+        main_address: TetraAddress::new(91, SsiType::Gssi),
+        handle: 0,
+        endpoint_id: 0,
+        link_id: 0,
+    };
+    assert!(cc.dispatch(
+        &mut queue,
+        CmceEvent::Downlink {
+            sdu: minimum(7).view(),
+            route
+        }
+    ));
+    queue = MessageQueue::new();
+    let deadline = cc.core.calls.get(&0x1234).unwrap().timers.call_deadline.unwrap();
+    for tick in 0..100 {
+        cc.core.push_event(deadline.add_timeslots(tick), CmceEvent::Tick).unwrap();
+        cc.drain_actions(&mut queue);
+    }
+    assert_eq!(
+        queue
+            .iter()
+            .filter(|message| matches!(message.msg, SapMsgInner::LcmcMleUnitdataReq(_)))
+            .count(),
+        1
+    );
+    assert_eq!(queue.iter().count(), 2);
+}
+
+#[test]
+fn local_tx_confirm_reports_denied_permission_without_revoking_current_floor() {
+    use crate::net_telemetry::channel::telemetry_channel;
+    use tetra_ms_core::cmce::CmceEvent;
+    let (sink, rx) = telemetry_channel();
+    let mut cc = CcMsSubentity::new(Some(sink));
+    cc.own_issi = Some(123);
+    let mut queue = MessageQueue::new();
+    let route = CallRoute {
+        main_address: TetraAddress::new(91, SsiType::Gssi),
+        handle: 0,
+        endpoint_id: 0,
+        link_id: 0,
+    };
+    assert!(cc.dispatch(
+        &mut queue,
+        CmceEvent::Downlink {
+            sdu: minimum(7).view(),
+            route
+        }
+    ));
+    assert!(cc.dispatch(&mut queue, CmceEvent::Demand { id: 0x1234, priority: 0 }));
+    while rx.try_recv().is_some() {}
+    let mut grant = minimum(11);
+    grant.view_mut().write(19, 2, 0).unwrap();
+    grant.view_mut().write(21, 1, 1).unwrap();
+    assert!(cc.dispatch(&mut queue, CmceEvent::Downlink { sdu: grant.view(), route }));
+    let Some(TelemetryEvent::TnccTxConfirm { confirm, .. }) = rx.try_recv() else {
+        panic!("TX confirm");
+    };
+    assert_eq!(
+        confirm.transmit_request_permission,
+        tncc::TransmissionRequestPermission::NotAllowedToRequestForTransmission
+    );
+    assert!(
+        cc.core.calls.get(&0x1234).unwrap().accepts_uplink(),
+        "permission controls future demand, not the grant itself"
+    );
+}

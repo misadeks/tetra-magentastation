@@ -36,6 +36,9 @@ pub struct TpUnitdataReqSlot {
     /// that hardware time. The BS downlink derives its own TX time from the
     /// stack clock, so it leaves this `None`.
     pub time: Option<TdmaTime>,
+    /// Full-slot NUB or explicitly granted CUB subslot; never inferred from
+    /// block storage or training sequence.
+    pub placement: crate::tmv::TxBurstPlacement,
 
     /// `true` when this uplink burst is a **reserved-access** transmission that
     /// must land in exactly the granted slot (see

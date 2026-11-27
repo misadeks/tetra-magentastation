@@ -1,5 +1,5 @@
 //! Command codec — bitcode-based and JSON-based serialization of
-//! [`Command`]s and [`CommandResponse`]s.
+//! [`ControlCommand`]s and [`ControlResponse`]s.
 
 use crate::{
     net_control::commands::{ControlCommand, ControlResponse},
@@ -15,22 +15,22 @@ use crate::{
 pub struct ControlCodecBitcode;
 
 impl ControlCodecBitcode {
-    /// Encode a [`Command`] to bitcode bytes.
+    /// Encode a [`ControlCommand`] to bitcode bytes.
     pub fn encode_command(&self, cmd: &ControlCommand) -> Vec<u8> {
         bitcode::encode(cmd)
     }
 
-    /// Decode bitcode bytes into a [`Command`].
+    /// Decode bitcode bytes into a [`ControlCommand`].
     pub fn decode_command(&self, payload: &[u8]) -> Result<ControlCommand, NetworkError> {
         bitcode::decode(payload).map_err(|e| NetworkError::SerializationError(format!("command decode: {}", e)))
     }
 
-    /// Encode a [`CommandResponse`] to bitcode bytes.
+    /// Encode a [`ControlResponse`] to bitcode bytes.
     pub fn encode_response(&self, resp: &ControlResponse) -> Vec<u8> {
         bitcode::encode(resp)
     }
 
-    /// Decode bitcode bytes into a [`CommandResponse`].
+    /// Decode bitcode bytes into a [`ControlResponse`].
     pub fn decode_response(&self, payload: &[u8]) -> Result<ControlResponse, NetworkError> {
         bitcode::decode(payload).map_err(|e| NetworkError::SerializationError(format!("command response decode: {}", e)))
     }
@@ -41,22 +41,22 @@ impl ControlCodecBitcode {
 pub struct ControlCodecJson;
 
 impl ControlCodecJson {
-    /// Encode a [`Command`] to JSON bytes.
+    /// Encode a [`ControlCommand`] to JSON bytes.
     pub fn encode_command(&self, cmd: &ControlCommand) -> Vec<u8> {
         serde_json::to_vec(cmd).unwrap_or_default()
     }
 
-    /// Decode JSON bytes into a [`Command`].
+    /// Decode JSON bytes into a [`ControlCommand`].
     pub fn decode_command(&self, payload: &[u8]) -> Result<ControlCommand, NetworkError> {
         serde_json::from_slice(payload).map_err(|e| NetworkError::SerializationError(format!("command decode: {}", e)))
     }
 
-    /// Encode a [`CommandResponse`] to JSON bytes.
+    /// Encode a [`ControlResponse`] to JSON bytes.
     pub fn encode_response(&self, resp: &ControlResponse) -> Vec<u8> {
         serde_json::to_vec(resp).unwrap_or_default()
     }
 
-    /// Decode JSON bytes into a [`CommandResponse`].
+    /// Decode JSON bytes into a [`ControlResponse`].
     pub fn decode_response(&self, payload: &[u8]) -> Result<ControlResponse, NetworkError> {
         serde_json::from_slice(payload).map_err(|e| NetworkError::SerializationError(format!("command response decode: {}", e)))
     }
@@ -69,6 +69,19 @@ impl ControlCodecJson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documented_json_requests_and_responses_match_control_schema() {
+        let codec = ControlCodecJson;
+        let document = include_str!("../../../../examples/ms-interface/README.md");
+        for section in document.split("```json\n").skip(1) {
+            let snippet = section.split("```").next().unwrap();
+            assert!(
+                codec.decode_command(snippet.as_bytes()).is_ok() || codec.decode_response(snippet.as_bytes()).is_ok(),
+                "documented JSON does not match the control schema: {snippet}"
+            );
+        }
+    }
 
     #[test]
     fn test_roundtrip_bitcode_command_a() {

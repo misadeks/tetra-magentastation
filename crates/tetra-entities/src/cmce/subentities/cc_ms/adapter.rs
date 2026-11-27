@@ -93,24 +93,29 @@ impl CcMsSubentity {
                         tx_reporter: None,
                     }),
                 }),
-                CmceAction::Configure { route, basic, state, .. } => queue.push_back(SapMsg {
-                    sap: Sap::LcmcSap,
-                    src: TetraEntity::Cmce,
-                    dest: TetraEntity::Mle,
-                    msg: SapMsgInner::LcmcMleConfigureReq(LcmcMleConfigureReq {
-                        endpoint_id: route.endpoint_id,
-                        chan_change_accepted: None,
-                        chan_change_handle: 0 as Todo,
-                        call_release: if state.switch_u_plane { None } else { Some(0 as Todo) },
-                        encryption_flag: basic.encrypted,
-                        circuit_mode_type: basic_from_core(basic).circuit_mode_type,
-                        add_temp_gssi: None,
-                        del_temp_gssi: None,
-                        simplex_duplex: state.simplex_duplex,
-                        tx_grant: state.tx_grant,
-                        switch_u_plane: state.switch_u_plane,
-                    }),
-                }),
+                CmceAction::Configure { id, route, basic, state } => {
+                    if !state.switch_u_plane || !state.tx_grant {
+                        self.audio.remove(&id);
+                    }
+                    queue.push_back(SapMsg {
+                        sap: Sap::LcmcSap,
+                        src: TetraEntity::Cmce,
+                        dest: TetraEntity::Mle,
+                        msg: SapMsgInner::LcmcMleConfigureReq(LcmcMleConfigureReq {
+                            endpoint_id: route.endpoint_id,
+                            chan_change_accepted: None,
+                            chan_change_handle: 0 as Todo,
+                            call_release: if state.switch_u_plane { None } else { Some(0 as Todo) },
+                            encryption_flag: basic.encrypted,
+                            circuit_mode_type: basic_from_core(basic).circuit_mode_type,
+                            add_temp_gssi: None,
+                            del_temp_gssi: None,
+                            simplex_duplex: state.simplex_duplex,
+                            tx_grant: state.tx_grant,
+                            switch_u_plane: state.switch_u_plane,
+                        }),
+                    });
+                }
                 CmceAction::Notify(notice) => self.emit_notice(notice),
                 CmceAction::Speech(_) => {}
                 CmceAction::Call { change, id, new_id } => {
@@ -129,7 +134,8 @@ impl CcMsSubentity {
                     }
                 }
             }
-            self.audio.retain(|id, _| self.core.calls.contains_key(id));
+            self.audio
+                .retain(|id, _| self.core.calls.get(id).is_some_and(|call| call.accepts_uplink()));
         }
     }
     fn emit_notice(&self, notice: CmceNotice) {
@@ -138,7 +144,7 @@ impl CcMsSubentity {
         let basic = basic_from_core(notice.basic);
         let offered = p.basic.and_then(|basic| tncc_basic_from_pdu(&basic_from_core(basic)));
         let notification = p.notification;
-        let permission = tncc::TransmissionRequestPermission::from_bool(p.permission_denied);
+        let permission = tncc::TransmissionRequestPermission::from_bool(!p.permission_denied);
         let external = field(p.external, notice.sdu.view(), 2);
         let event = match notice.kind {
             NoticeKind::Setup => {

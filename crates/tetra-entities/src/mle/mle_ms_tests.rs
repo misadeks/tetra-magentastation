@@ -1012,6 +1012,11 @@ fn portable_downlink_adapter_preserves_routes_metadata_and_bitbuffer_cursor() {
                     msg,
                 },
             );
+            if protocol == 4 {
+                assert!(queue.iter().next().is_none(), "unsupported SNDCP never reaches CMCE");
+                assert!(mle.core.state().serving_cell.is_none());
+                continue;
+            }
             let out = queue.pop_front().unwrap();
             assert_eq!(out.dest, if protocol == 1 { TetraEntity::Mm } else { TetraEntity::Cmce });
             let mut sdu = match out.msg {
@@ -1025,14 +1030,6 @@ fn portable_downlink_adapter_preserves_routes_metadata_and_bitbuffer_cursor() {
                     assert_eq!(protocol, 2);
                     assert_eq!(prim.received_tetra_address, address);
                     assert_eq!((prim.endpoint_id, prim.link_id, prim.handle), (0x1234, 7, 0));
-                    assert!(!prim.chan_change_resp_req);
-                    assert!(prim.chan_change_handle.is_none());
-                    prim.sdu
-                }
-                SapMsgInner::LtpdMleUnitdataInd(prim) => {
-                    assert_eq!(protocol, 4);
-                    assert_eq!(prim.received_tetra_address, address);
-                    assert_eq!((prim.endpoint_id, prim.link_id), (0x1234, 7));
                     assert!(!prim.chan_change_resp_req);
                     assert!(prim.chan_change_handle.is_none());
                     prim.sdu

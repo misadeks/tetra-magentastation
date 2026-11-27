@@ -140,7 +140,7 @@ impl Demodulator {
         // This also avoids skipping demodulation of a slot
         // due to a small number of lost samples.
         let samples_lost = sample_counter - self.next_input_sample_count;
-        let samples_to_add = samples_lost.max(0).min(SAMPLES_SLOT);
+        let samples_to_add = samples_lost.clamp(0, SAMPLES_SLOT);
         for i in -samples_to_add..0 {
             self.process_sample(ComplexSample::ZERO, sample_counter + i);
         }
@@ -358,7 +358,7 @@ impl Demodulator {
         // waves are simply +1,0,-1,0 and so on, simplifying
         // the loop to only additions and subtractions.
         // If SPS is changed to something else, this code needs to be updated.
-        assert!(SPS == 4);
+        const { assert!(SPS == 4) };
 
         let mut sum_i: RealSample = 0.0;
         let mut sum_q: RealSample = 0.0;
@@ -453,13 +453,9 @@ impl SlotBurstFinder {
     const ERRS_NO_BURST: usize = 100;
 
     // const SEQ_NORM_DL_MAX_ERRS: usize = 2;
-    // const SEQ_NORM_UL_MAX_ERRS: usize = 2;
-    // const SEQ_EXT_MAX_ERRS: usize = 2;
     // const SEQ_SYNC_MAX_ERRS: usize = 3;
 
     const SEQ_NORM_DL_MAX_ERRS: usize = 1;
-    const SEQ_NORM_UL_MAX_ERRS: usize = 1;
-    const SEQ_EXT_MAX_ERRS: usize = 1;
     const SEQ_SYNC_MAX_ERRS: usize = 1;
 
     fn new() -> Self {

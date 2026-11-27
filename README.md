@@ -2,6 +2,8 @@
 
 <img src="contrib/logo/magentastation.svg" alt="MagentaStation emblem" width="160" />
 
+<sub>* MagentaStation is not affiliated with BlueStation or Midnight Blue.</sub>
+
 MagentaStation is a TETRA mobile-station (MS) stack. It uses an SDR to receive a
 cell's downlink, register, attach to talkgroups, and handle calls and short data
 messages. The separate [Slint MMI](https://github.com/misadeks/tetra-bluestation-mmi)

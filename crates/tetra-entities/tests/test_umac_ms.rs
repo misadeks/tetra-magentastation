@@ -333,7 +333,7 @@ fn test_build_mac_access_block_roundtrip() {
     assert_eq!(decoded.length_ind, None, "no length indication (cl. 21.4.2.1)");
     assert_eq!(decoded.frag_flag, None, "no capacity request / fragmentation flag");
     assert_eq!(decoded.reservation_req, None, "no reservation requirement");
-    assert_eq!(decoded.fill_bits, true, "fill bits complete the MAC block");
+    assert!(decoded.fill_bits, "fill bits complete the MAC block");
 
     // The buffer cursor now sits at the start of the TM-SDU (after the header).
     assert_eq!(block.get_pos(), 30, "MAC-ACCESS header is 30 bits (no optional field)");
@@ -373,7 +373,7 @@ fn test_build_mac_access_block_fillbits() {
     let decoded = MacAccess::from_bitbuf(&mut block).expect("decodes");
     assert_eq!(decoded.addr.expect("addressed").ssi, issi);
     assert_eq!(decoded.length_ind, None, "no length indication (cl. 21.4.2.1)");
-    assert_eq!(decoded.fill_bits, true, "fill bits present");
+    assert!(decoded.fill_bits, "fill bits present");
 
     // SDU sits immediately after the 30-bit header, before the fill bits.
     assert_eq!(block.get_pos(), 30);
@@ -442,7 +442,7 @@ fn test_uplink_fragmentation_roundtrip() {
         "capacity request asks for one subslot"
     );
     assert_eq!(frag_pdu.length_ind, None, "frag-start carries no length indication");
-    assert_eq!(frag_pdu.fill_bits, false, "first fragment fills the block, no fill bits");
+    assert!(!frag_pdu.fill_bits, "first fragment fills the block, no fill bits");
     // Header is 36 bits (ISSI + optional field flag + capacity request); the
     // first 56 TM-SDU bits follow.
     assert_eq!(frag_block.get_pos(), 36, "frag-start header is 36 bits");
@@ -457,7 +457,7 @@ fn test_uplink_fragmentation_roundtrip() {
     // 7-bit header + 40-bit SDU = 47 content bits; padded to 48 (6 octets) with
     // a single fill bit (cl. 23.4.2.2).
     assert_eq!(end_pdu.length_ind, Some(6), "length indication = 6 octets");
-    assert_eq!(end_pdu.fill_bits, true, "one fill bit pads to the octet boundary");
+    assert!(end_pdu.fill_bits, "one fill bit pads to the octet boundary");
     assert_eq!(end_pdu.reservation_req, None, "final fragment carries no reservation requirement");
     assert_eq!(end_block.get_pos(), 7, "MAC-END-HU header is 7 bits");
     let mut rest = vec![0u8; 40];
@@ -482,7 +482,7 @@ fn test_mac_end_hu_byte_aligned_no_fill() {
     let mut block = UmacMs::build_mac_end_hu_block(&mut remainder).expect("fits one MAC-END-HU");
     let pdu = MacEndHu::from_bitbuf(&mut block).expect("decodes");
     assert_eq!(pdu.length_ind, Some(7), "56 content bits = 7 octets");
-    assert_eq!(pdu.fill_bits, false, "byte-aligned, no fill bits");
+    assert!(!pdu.fill_bits, "byte-aligned, no fill bits");
     let mut rest = vec![0u8; 49];
     block.to_bitarr(&mut rest);
     assert_eq!(rest, expected, "recovered remainder matches");
@@ -534,7 +534,7 @@ fn test_uplink_fragmentation_full_slot_roundtrip() {
         "capacity request asks for one full slot"
     );
     assert_eq!(frag_pdu.length_ind, None, "frag-start carries no length indication");
-    assert_eq!(frag_pdu.fill_bits, false, "first fragment fills the block, no fill bits");
+    assert!(!frag_pdu.fill_bits, "first fragment fills the block, no fill bits");
     assert_eq!(frag_block.get_pos(), 36, "frag-start header is 36 bits");
     let mut first = vec![0u8; 56];
     frag_block.to_bitarr(&mut first);
@@ -547,7 +547,7 @@ fn test_uplink_fragmentation_full_slot_roundtrip() {
     // 10-bit header + 204-bit SDU = 214 content bits; padded to 216 (27 octets)
     // with two fill bits (cl. 23.4.2.2).
     assert_eq!(end_pdu.length_ind, Some(27), "length indication = 27 octets");
-    assert_eq!(end_pdu.fill_bits, true, "fill bits pad to the octet boundary");
+    assert!(end_pdu.fill_bits, "fill bits pad to the octet boundary");
     assert_eq!(end_pdu.reservation_req, None, "final fragment carries no reservation requirement");
     assert_eq!(end_block.get_pos(), 10, "MAC-END-UL header is 10 bits");
     let mut rest = vec![0u8; 204];

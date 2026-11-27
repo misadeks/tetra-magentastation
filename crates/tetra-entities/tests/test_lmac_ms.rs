@@ -5,7 +5,7 @@ use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, BurstType, PhyBlockNum, PhyBlockType, PhysicalChannel, Sap, TdmaTime, TrainingSequence, debug};
 use tetra_entities::lmac::components::errorcontrol;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
-use tetra_saps::tmv::{TmvConfigureReq, TmvUnitdataReq, TmvUnitdataReqSlot, enums::logical_chans::LogicalChannel};
+use tetra_saps::tmv::{TmvConfigureReq, TmvUnitdataReq, TmvUnitdataReqSlot, TxBurstPlacement, enums::logical_chans::LogicalChannel};
 use tetra_saps::tp::TpUnitdataInd;
 
 use crate::common::ComponentTest;
@@ -28,6 +28,20 @@ fn bits_of(buf: &BitBuffer, nbits: usize) -> Vec<u8> {
 /// Drive a single TMV-UNITDATA request carrying one uplink MAC block through
 /// LmacMs and return the encoded TP-UNITDATA request slot it emits to PHY.
 fn encode_uplink(lchan: LogicalChannel, mac_block: BitBuffer, scrambling_code: u32) -> tetra_saps::tp::TpUnitdataReqSlot {
+    let placement = if lchan == LogicalChannel::SchHu {
+        TxBurstPlacement::Subslot1
+    } else {
+        TxBurstPlacement::FullSlot
+    };
+    encode_uplink_at(lchan, mac_block, scrambling_code, placement)
+}
+
+fn encode_uplink_at(
+    lchan: LogicalChannel,
+    mac_block: BitBuffer,
+    scrambling_code: u32,
+    placement: TxBurstPlacement,
+) -> tetra_saps::tp::TpUnitdataReqSlot {
     let mut test = ComponentTest::new(StackMode::Ms, None);
     test.populate_entities(vec![TetraEntity::Lmac], vec![TetraEntity::Phy]);
 
@@ -38,6 +52,7 @@ fn encode_uplink(lchan: LogicalChannel, mac_block: BitBuffer, scrambling_code: u
         msg: SapMsgInner::TmvUnitdataReq(TmvUnitdataReqSlot {
             ts: TdmaTime::default(),
             ul_phy_chan: PhysicalChannel::Cp,
+            placement,
             blk1: Some(TmvUnitdataReq {
                 mac_block,
                 logical_channel: lchan,
@@ -90,6 +105,7 @@ fn test_lmac_ms_tx_schhu_cub() {
 
     assert_eq!(slot.burst_type, BurstType::CUB);
     assert_eq!(slot.train_type, TrainingSequence::ExtendedTrainSeq);
+    assert_eq!(slot.placement, TxBurstPlacement::Subslot1);
     assert!(slot.bbk.is_none());
     assert!(slot.blk2.is_none());
     let type5 = slot.blk1.expect("blk1 present");
@@ -101,6 +117,20 @@ fn test_lmac_ms_tx_schhu_cub() {
         bits_of(&decoded.unwrap(), 92),
         orig_bits,
         "recovered type-1 block must match original"
+    );
+}
+
+#[test]
+fn test_lmac_ms_preserves_second_subslot_without_changing_payload() {
+    let first = encode_uplink_at(LogicalChannel::SchHu, make_block(92), 1761749767, TxBurstPlacement::Subslot1);
+    let second = encode_uplink_at(LogicalChannel::SchHu, make_block(92), 1761749767, TxBurstPlacement::Subslot2);
+    assert_eq!(second.placement, TxBurstPlacement::Subslot2);
+    assert_eq!(second.burst_type, BurstType::CUB);
+    assert_eq!(second.train_type, TrainingSequence::ExtendedTrainSeq);
+    assert_eq!(first.time, second.time);
+    assert_eq!(
+        bits_of(first.blk1.as_ref().unwrap(), 168),
+        bits_of(second.blk1.as_ref().unwrap(), 168)
     );
 }
 
@@ -181,6 +211,7 @@ fn encode_uplink_stolen(stch_block: BitBuffer, speech_block: BitBuffer, scrambli
         msg: SapMsgInner::TmvUnitdataReq(TmvUnitdataReqSlot {
             ts: TdmaTime::default(),
             ul_phy_chan: PhysicalChannel::Tp,
+            placement: TxBurstPlacement::FullSlot,
             blk1: Some(TmvUnitdataReq {
                 mac_block: stch_block,
                 logical_channel: LogicalChannel::Stch,

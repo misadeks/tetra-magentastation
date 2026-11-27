@@ -1,6 +1,6 @@
 use tetra_core::TdmaTime;
 
-use tetra_pdus::phy::traits::rxtx_dev::TxSlotBits;
+use tetra_pdus::phy::traits::rxtx_dev::{TxBurstPlacement, TxSlotBits};
 
 use crate::phy::components::dsp_types::*;
 use crate::phy::components::fir;
@@ -69,47 +69,52 @@ impl Modulator {
                 // SN0 (n = 0) is the differential phase reference and carries no
                 // information. d is the burst delay from Table 9.2: 17 symbols for
                 // both the Normal Uplink Burst (SNmax = 231) and the Control
-                // Uplink Burst in subslot 1 (SNmax = 103). Symbols outside the
+                // Uplink Burst in subslot 1 (SNmax = 103); subslot 2 uses 144.5
+                // symbols. Keep the half-symbol position in sample units.
+                // Symbols outside the
                 // active part are silence, so the shared antenna / PA is only
                 // driven during the burst.
-                const BURST_DELAY_SYMS: SampleCount = 17;
+                let burst_delay = match tx_slot.placement {
+                    TxBurstPlacement::FullSlot | TxBurstPlacement::Subslot1 => 17 * SPS,
+                    TxBurstPlacement::Subslot2 => 17 * SPS + SAMPLES_SLOT / 2,
+                };
 
                 let sample_in_slot = sample_counter - slot_begin;
                 let snmax = tx_slot.slot.map_or(0, |bits| (bits.len() / 2) as SampleCount);
 
-                if sample_in_slot < BURST_DELAY_SYMS * SPS {
+                if sample_in_slot < burst_delay {
                     // Before SN0: silence (also lets the pulse-shaping filter
                     // settle before the active part).
                 } else if sample_in_slot >= SAMPLES_SLOT {
                     // Slot is in the past; wait for the next burst.
                     return Err(Error::NeedMoreData);
-                } else if let Some(bits) = tx_slot.slot {
-                    if sample_in_slot % SPS == 0 {
-                        // Symbol index relative to SN0.
-                        let sn = (sample_in_slot / SPS) - BURST_DELAY_SYMS;
-                        if sn == 0 {
-                            // SN0: reset the differential reference and emit the
-                            // reference symbol so SN1's phase transition is
-                            // decodable at the BS.
-                            self.dqpsk.reset_phase();
-                            sample = self.dqpsk.reference();
-                            // Fires exactly once per burst, at the start of the
-                            // active part: definitive proof the uplink burst was
-                            // actually synthesized (not silence), plus its timing
-                            // alignment for tuning MS_TX_SAMPLE_DELAY.
-                            tracing::debug!(
-                                ts = %tx_slot.time,
-                                slot_begin,
-                                sample_counter,
-                                snmax,
-                                "Modulator: uplink burst active part emitted (SN0)"
-                            );
-                        } else if sn >= 1 && sn <= snmax {
-                            let i = (sn - 1) as usize;
-                            sample = self.dqpsk.symbol(bits[i * 2] != 0, bits[i * 2 + 1] != 0);
-                        }
-                        // sn > snmax: past the active part (guard), stay silent.
+                } else if let Some(bits) = tx_slot.slot
+                    && (sample_in_slot - burst_delay) % SPS == 0
+                {
+                    // Symbol index relative to SN0.
+                    let sn = (sample_in_slot - burst_delay) / SPS;
+                    if sn == 0 {
+                        // SN0: reset the differential reference and emit the
+                        // reference symbol so SN1's phase transition is
+                        // decodable at the BS.
+                        self.dqpsk.reset_phase();
+                        sample = self.dqpsk.reference();
+                        // Fires exactly once per burst, at the start of the
+                        // active part: definitive proof the uplink burst was
+                        // actually synthesized (not silence), plus its timing
+                        // alignment for tuning MS_TX_SAMPLE_DELAY.
+                        tracing::debug!(
+                            ts = %tx_slot.time,
+                            slot_begin,
+                            sample_counter,
+                            snmax,
+                            "Modulator: uplink burst active part emitted (SN0)"
+                        );
+                    } else if sn >= 1 && sn <= snmax {
+                        let i = (sn - 1) as usize;
+                        sample = self.dqpsk.symbol(bits[i * 2] != 0, bits[i * 2 + 1] != 0);
                     }
+                    // sn > snmax: past the active part (guard), stay silent.
                 }
             }
         }
@@ -154,38 +159,40 @@ struct DqpskMapper {
 ///   import numpy as np
 ///   print(",\n".join("ComplexSample{ re: %9.6f, im: %9.6f }" % (v.real, v.imag)
 ///       for v in np.exp(1j*np.linspace(0, np.pi*2, 8, endpoint=False))))
+// Preserve the original six-decimal table's f32 rounding, not FRAC_1_SQRT_2.
+const LEGACY_DIAGONAL: f32 = f32::from_bits(0x3f35_04f7);
 const CONSTELLATION: [ComplexSample; 8] = [
     ComplexSample {
         re: 1.000000,
         im: 0.000000,
     },
     ComplexSample {
-        re: 0.707107,
-        im: 0.707107,
+        re: LEGACY_DIAGONAL,
+        im: LEGACY_DIAGONAL,
     },
     ComplexSample {
         re: 0.000000,
         im: 1.000000,
     },
     ComplexSample {
-        re: -0.707107,
-        im: 0.707107,
+        re: -LEGACY_DIAGONAL,
+        im: LEGACY_DIAGONAL,
     },
     ComplexSample {
         re: -1.000000,
         im: 0.000000,
     },
     ComplexSample {
-        re: -0.707107,
-        im: -0.707107,
+        re: -LEGACY_DIAGONAL,
+        im: -LEGACY_DIAGONAL,
     },
     ComplexSample {
         re: -0.000000,
         im: -1.000000,
     },
     ComplexSample {
-        re: 0.707107,
-        im: -0.707107,
+        re: LEGACY_DIAGONAL,
+        im: -LEGACY_DIAGONAL,
     },
 ];
 
@@ -198,8 +205,7 @@ impl DqpskMapper {
         self.phase = 0;
     }
 
-    /// Constellation point for the current phase, without advancing it. Used to
-    /// emit the SN0 differential phase reference of an uplink burst.
+    /// Constellation point for the current phase without advancing it (SN0).
     pub fn reference(&self) -> ComplexSample {
         CONSTELLATION[self.phase as usize]
     }
@@ -214,5 +220,73 @@ impl DqpskMapper {
             })
             & 7;
         CONSTELLATION[self.phase as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constellation_preserves_legacy_float_bits() {
+        let expected = [
+            (0x3f80_0000, 0),
+            (0x3f35_04f7, 0x3f35_04f7),
+            (0, 0x3f80_0000),
+            (0xbf35_04f7, 0x3f35_04f7),
+            (0xbf80_0000, 0),
+            (0xbf35_04f7, 0xbf35_04f7),
+            (0x8000_0000, 0xbf80_0000),
+            (0x3f35_04f7, 0xbf35_04f7),
+        ];
+        for (sample, (re, im)) in CONSTELLATION.iter().zip(expected) {
+            assert_eq!((sample.re.to_bits(), sample.im.to_bits()), (re, im));
+        }
+    }
+
+    #[test]
+    fn uplink_samples_match_independent_timing_and_pulse_synthesis() {
+        for (placement, delay, nbits) in [
+            (TxBurstPlacement::FullSlot, 68, 462),
+            (TxBurstPlacement::Subslot1, 68, 206),
+            (TxBurstPlacement::Subslot2, 578, 206),
+        ] {
+            let bits: Vec<u8> = (0..nbits).map(|i| ((i * 7 + i / 3) & 1) as u8).collect();
+            let slot = TxSlotBits {
+                time: TdmaTime::from_int(8),
+                slot: Some(&bits),
+                placement,
+            };
+            let mut modulator = Modulator::new(Mode::Ul);
+            modulator.set_reference_time(321);
+            let beginning = 321 + 8 * 1020;
+            let mut impulses = [ComplexSample::ZERO; 1020];
+            impulses[delay] = ComplexSample::new(1.0, 0.0);
+            let mut phase: i32 = 0;
+            for (i, dibit) in bits.chunks_exact(2).enumerate() {
+                phase = (phase + [1, 3, -1, -3][(dibit[0] * 2 + dibit[1]) as usize]).rem_euclid(8);
+                // Independent polar synthesis; legacy rounding is checked above.
+                let angle = phase as f64 * std::f64::consts::FRAC_PI_4;
+                let (im, re) = angle.sin_cos();
+                let rounded = |v: f64| ((v * 1_000_000.0).round() / 1_000_000.0) as f32;
+                impulses[delay + (i + 1) * 4] = ComplexSample::new(rounded(re), rounded(im));
+            }
+            for sample_index in 0..1020 {
+                // Symmetric 32-tap FIR, written independently of FirComplexSym.
+                let mut expected = ComplexSample::ZERO;
+                for tap_index in 0..32.min(sample_index + 1) {
+                    let tap = CHANNEL_FILTER_TAPS[if tap_index < 16 { 15 - tap_index } else { tap_index - 16 }];
+                    expected += impulses[sample_index - tap_index] * tap;
+                }
+                let actual = modulator
+                    .sample(beginning + sample_index as i64 - 16, &slot)
+                    .unwrap_or_else(|_| panic!("slot ended early"));
+                assert!(
+                    (actual - expected).norm() < 1e-6,
+                    "{placement:?} sample {sample_index}: {actual:?} != {expected:?}"
+                );
+            }
+            assert!(matches!(modulator.sample(beginning + 1020 - 16, &slot), Err(Error::NeedMoreData)));
+        }
     }
 }

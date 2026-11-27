@@ -1,9 +1,13 @@
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use tetra_core::tetra_entities::TetraEntity;
 
 use crate::net_control::commands::{ControlCommand, ControlResponse};
+
+pub const CONTROL_QUEUE_CAPACITY: usize = 64;
 
 // ---------------------------------------------------------------------------
 // CommandDispatcher  (worker side of a per‑entity link)
@@ -15,20 +19,26 @@ use crate::net_control::commands::{ControlCommand, ControlResponse};
 pub struct CommandDispatcher {
     cmd_tx: Sender<ControlCommand>,
     resp_rx: Receiver<ControlResponse>,
+    resp_closed: Cell<bool>,
 }
 
 impl CommandDispatcher {
-    /// Send a command to the linked entity. Fire‑and‑forget: silently drops
-    /// if the entity's endpoint has been dropped.
+    /// Submit a command, logging failure for local callers without a reply path.
     #[inline]
     pub fn send(&self, command: ControlCommand) {
-        let _ = self.cmd_tx.send(command);
+        if self.try_send(command).is_err() {
+            tracing::warn!("Control command rejected: entity queue full or closed");
+        }
+    }
+
+    pub fn try_send(&self, command: ControlCommand) -> Result<(), TrySendError<ControlCommand>> {
+        self.cmd_tx.try_send(command)
     }
 
     /// Non-blocking: collect all pending responses from the entity.
     pub fn try_recv_responses(&self) -> Vec<ControlResponse> {
         let mut responses = Vec::new();
-        while let Ok(resp) = self.resp_rx.try_recv() {
+        while let Some(resp) = self.try_recv_response() {
             responses.push(resp);
         }
         responses
@@ -36,7 +46,19 @@ impl CommandDispatcher {
 
     /// Non-blocking: collect a single pending response, if any.
     pub fn try_recv_response(&self) -> Option<ControlResponse> {
-        self.resp_rx.try_recv().ok()
+        match self.resp_rx.try_recv() {
+            Ok(response) => Some(response),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.resp_closed.set(true);
+                None
+            }
+        }
+    }
+
+    /// True only after all final responses were drained and the entity dropped.
+    pub fn is_closed(&self) -> bool {
+        self.resp_closed.get()
     }
 }
 
@@ -64,11 +86,21 @@ impl ControlEndpoint {
         self.cmd_rx.recv().ok()
     }
 
-    /// Send a response back to the worker. Fire‑and‑forget: silently drops
-    /// if the dispatcher has been dropped.
+    /// Send a response with bounded backpressure; report an unavailable worker.
     #[inline]
     pub fn respond(&self, response: ControlResponse) {
-        let _ = self.resp_tx.send(response);
+        if let Err(error) = self.try_respond(response) {
+            let reason = if error.is_timeout() {
+                "response queue full"
+            } else {
+                "worker closed"
+            };
+            tracing::error!("Control response could not be queued: {reason}");
+        }
+    }
+
+    pub fn try_respond(&self, response: ControlResponse) -> Result<(), crossbeam_channel::SendTimeoutError<ControlResponse>> {
+        self.resp_tx.send_timeout(response, Duration::from_millis(250))
     }
 }
 
@@ -81,9 +113,16 @@ impl ControlEndpoint {
 /// - The **dispatcher** (worker side) sends [`ControlCommand`]s and receives [`ControlResponse`]s.
 /// - The **endpoint** (entity side) receives [`ControlCommand`]s and sends [`ControlResponse`]s.
 pub fn make_control_link() -> (CommandDispatcher, ControlEndpoint) {
-    let (cmd_tx, cmd_rx) = unbounded();
-    let (resp_tx, resp_rx) = unbounded();
-    (CommandDispatcher { cmd_tx, resp_rx }, ControlEndpoint { cmd_rx, resp_tx })
+    let (cmd_tx, cmd_rx) = bounded(CONTROL_QUEUE_CAPACITY);
+    let (resp_tx, resp_rx) = bounded(CONTROL_QUEUE_CAPACITY * 2);
+    (
+        CommandDispatcher {
+            cmd_tx,
+            resp_rx,
+            resp_closed: Cell::new(false),
+        },
+        ControlEndpoint { cmd_rx, resp_tx },
+    )
 }
 
 /// Build one CommandDispatcher / CommandEndpoint pair per TetraEntity
@@ -182,7 +221,7 @@ mod tests {
         {
             assert_eq!(*handle, 2);
             assert_eq!(*ssi, 0);
-            assert_eq!(*is_group, false);
+            assert!(!(*is_group));
             assert_eq!(*payload, vec![0xFF]);
         } else {
             panic!("expected Command::SendSds variant");

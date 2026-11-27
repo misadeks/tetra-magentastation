@@ -21,11 +21,18 @@ pub(super) fn data_from_core(data: UserData) -> SdsUserData {
     }
 }
 
-pub(super) fn dispatch(core: &mut SdsCore, telemetry: Option<&TelemetrySink>, queue: &mut MessageQueue, event: SdsEvent<'_>) {
-    if let Err(error) = core.push_event(event) {
+pub(super) fn dispatch(
+    core: &mut SdsCore,
+    telemetry: Option<&TelemetrySink>,
+    queue: &mut MessageQueue,
+    event: SdsEvent<'_>,
+) -> Result<(), SdsError> {
+    let result = core.push_event(event);
+    if let Err(error) = result {
         tracing::warn!(?error, "CMCE-MS SDS rejected event");
     }
     drain(core, telemetry, queue);
+    result
 }
 
 pub(super) fn drain(core: &mut SdsCore, telemetry: Option<&TelemetrySink>, queue: &mut MessageQueue) {

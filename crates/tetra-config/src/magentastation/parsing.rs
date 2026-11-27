@@ -59,31 +59,31 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     if !root.net_info.extra.is_empty() {
         return Err(format!("Unrecognized fields in net_info: {:?}", sorted_keys(&root.net_info.extra)).into());
     }
-    if let Some(ref ci) = root.cell_info {
-        if !ci.extra.is_empty() {
-            return Err(format!("Unrecognized fields in cell_info: {:?}", sorted_keys(&ci.extra)).into());
-        }
+    if let Some(ref ci) = root.cell_info
+        && !ci.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in cell_info: {:?}", sorted_keys(&ci.extra)).into());
     }
 
     // Optional telemetry section
-    if let Some(ref telemetry) = root.telemetry {
-        if !telemetry.extra.is_empty() {
-            return Err(format!("Unrecognized fields in telemetry config: {:?}", sorted_keys(&telemetry.extra)).into());
-        }
+    if let Some(ref telemetry) = root.telemetry
+        && !telemetry.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in telemetry config: {:?}", sorted_keys(&telemetry.extra)).into());
     }
 
     // Optional ms section (required when stack_mode = Ms; presence checked in validate())
-    if let Some(ref ms) = root.ms {
-        if !ms.extra.is_empty() {
-            return Err(format!("Unrecognized fields in ms config: {:?}", sorted_keys(&ms.extra)).into());
-        }
+    if let Some(ref ms) = root.ms
+        && !ms.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in ms config: {:?}", sorted_keys(&ms.extra)).into());
     }
 
     // Optional duplex_table section
-    if let Some(ref dt) = root.duplex_table {
-        if !dt.extra.is_empty() {
-            return Err(format!("Unrecognized fields in duplex_table config: {:?}", sorted_keys(&dt.extra)).into());
-        }
+    if let Some(ref dt) = root.duplex_table
+        && !dt.extra.is_empty()
+    {
+        return Err(format!("Unrecognized fields in duplex_table config: {:?}", sorted_keys(&dt.extra)).into());
     }
 
     // Build the codeplug (Plane B, optional). RF resolution + validation errors
@@ -105,7 +105,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     let mut cfg = StackConfig {
         stack_mode: root.stack_mode,
         debug_log: root.debug_log,
-        phy_io: phy_dto_to_cfg(root.phy_io),
+        phy_io: phy_dto_to_cfg(root.phy_io)?,
         net: net_dto_to_cfg(root.net_info),
         cell: cell_dto_to_cfg(root.cell_info.unwrap_or_default()),
         duplex_table: match root.duplex_table {
@@ -123,15 +123,13 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     // scan/cell-selection engine retunes it at runtime; the uplink is left unset
     // until the MS camps and derives it from the cell's SYSINFO (EN 300 392-2
     // cl. 18.4.2.2), at which point the UMAC issues a runtime TX retune.
-    if cfg.stack_mode == StackMode::Ms {
-        if let Some(soapy) = cfg.phy_io.soapysdr.as_mut() {
-            if soapy.dl_freq == 0.0 {
-                if let Some(first) = cfg.codeplug.scan_candidate_frequencies().first().copied() {
-                    soapy.dl_freq = first as f64;
-                    soapy.dl_freq_seeded = true;
-                }
-            }
-        }
+    if cfg.stack_mode == StackMode::Ms
+        && let Some(soapy) = cfg.phy_io.soapysdr.as_mut()
+        && soapy.dl_freq == 0.0
+        && let Some(first) = cfg.codeplug.scan_candidate_frequencies().first().copied()
+    {
+        soapy.dl_freq = first as f64;
+        soapy.dl_freq_seeded = true;
     }
 
     if let Some(telemetry) = root.telemetry {
@@ -142,6 +140,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         cfg.control = Some(apply_control_patch(command)?);
     }
 
+    cfg.validate()?;
     Ok(cfg)
 }
 
@@ -187,6 +186,14 @@ fn sorted_keys(map: &HashMap<String, Value>) -> Vec<&str> {
     let mut v: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
     v.sort_unstable();
     v
+}
+
+pub(super) fn reject_unknown_fields(section: &str, extra: &HashMap<String, Value>) -> Result<(), String> {
+    if extra.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Unrecognized fields in {section}: {:?}", sorted_keys(extra)))
+    }
 }
 
 /// ----------------------- DTOs for input shape -----------------------
@@ -252,8 +259,7 @@ fn cfg_to_root(cfg: &StackConfig) -> TomlConfigRoot {
         debug_log: cfg.debug_log.clone(),
         phy_io: cfg_to_phy_dto(&cfg.phy_io),
         net_info: cfg_to_net_dto(&cfg.net),
-        // MS learns cell identity/RF over the air.
-        cell_info: None,
+        cell_info: super::cfg_to_cell_dto(&cfg.cell),
         telemetry: cfg.telemetry.as_ref().map(cfg_telemetry_to_dto),
         command: cfg.control.as_ref().map(cfg_control_to_dto),
         ms: cfg.ms.as_ref().map(cfg_to_ms_dto),
@@ -298,7 +304,7 @@ pub fn to_toml_string(cfg: &StackConfig) -> Result<String, String> {
 /// `incoming` differs from `current` **only** in the codeplug (folders,
 /// talkgroups, networks, carrier overrides, frequency lists, scan lists,
 /// gateways, contacts, and codeplug settings). Such a change can be hot-swapped
-/// live ([`SharedConfig::apply_config_live`]) with no restart. Any difference in
+/// live ([`super::SharedConfig::apply_config_live`]) with no restart. Any difference in
 /// a structural section (`stack_mode`, `[phy_io]`, `[net_info]`, `[cell_info]`,
 /// `[ms]`, `[duplex_table]`, `[control]`, `[telemetry]`, `debug_log`)
 /// returns `false` — those still require a restart.
@@ -307,6 +313,10 @@ pub fn to_toml_string(cfg: &StackConfig) -> Result<String, String> {
 /// codeplug cleared, so it is robust without requiring `PartialEq` on every
 /// nested config type (including secret-bearing sections).
 pub fn is_operational_only_change(current: &StackConfig, incoming: &StackConfig) -> bool {
+    // Legacy cell seeds initialize MM/PHY and are structural even when omitted by default.
+    if current.cell != incoming.cell {
+        return false;
+    }
     let mut a = current.clone();
     let mut b = incoming.clone();
     a.codeplug = crate::magentastation::CfgCodeplug::default();
@@ -336,15 +346,15 @@ pub fn is_operational_only_change(current: &StackConfig, incoming: &StackConfig)
 /// Redacted fields: control/telemetry HTTP Basic passwords.
 pub fn to_toml_string_redacted(cfg: &StackConfig) -> Result<String, String> {
     let mut root = cfg_to_root(cfg);
-    if let Some(c) = root.command.as_mut() {
-        if c.password.is_some() {
-            c.password = Some(REDACTED_SECRET.to_string());
-        }
+    if let Some(c) = root.command.as_mut()
+        && c.password.is_some()
+    {
+        c.password = Some(REDACTED_SECRET.to_string());
     }
-    if let Some(t) = root.telemetry.as_mut() {
-        if t.password.is_some() {
-            t.password = Some(REDACTED_SECRET.to_string());
-        }
+    if let Some(t) = root.telemetry.as_mut()
+        && t.password.is_some()
+    {
+        t.password = Some(REDACTED_SECRET.to_string());
     }
     toml::to_string_pretty(&root).map_err(|e| format!("TOML serialization failed: {e}"))
 }
@@ -360,31 +370,29 @@ pub fn to_toml_string_redacted(cfg: &StackConfig) -> Result<String, String> {
 /// (not the sentinel) is kept as supplied. Removing a section entirely is an
 /// honest edit and is left as-is (the secret is dropped with its section).
 pub fn restore_redacted_secrets(mut incoming: StackConfig, current: &StackConfig) -> StackConfig {
-    if let Some(ctrl) = incoming.control.as_mut() {
-        if let Some((user, pass)) = ctrl.credentials.clone() {
-            if pass == REDACTED_SECRET {
-                let restored = current
-                    .control
-                    .as_ref()
-                    .and_then(|c| c.credentials.as_ref())
-                    .map(|(_, cp)| cp.clone())
-                    .unwrap_or(pass);
-                ctrl.credentials = Some((user, restored));
-            }
-        }
+    if let Some(ctrl) = incoming.control.as_mut()
+        && let Some((user, pass)) = ctrl.credentials.clone()
+        && pass == REDACTED_SECRET
+    {
+        let restored = current
+            .control
+            .as_ref()
+            .and_then(|c| c.credentials.as_ref())
+            .map(|(_, cp)| cp.clone())
+            .unwrap_or(pass);
+        ctrl.credentials = Some((user, restored));
     }
-    if let Some(tel) = incoming.telemetry.as_mut() {
-        if let Some((user, pass)) = tel.credentials.clone() {
-            if pass == REDACTED_SECRET {
-                let restored = current
-                    .telemetry
-                    .as_ref()
-                    .and_then(|t| t.credentials.as_ref())
-                    .map(|(_, cp)| cp.clone())
-                    .unwrap_or(pass);
-                tel.credentials = Some((user, restored));
-            }
-        }
+    if let Some(tel) = incoming.telemetry.as_mut()
+        && let Some((user, pass)) = tel.credentials.clone()
+        && pass == REDACTED_SECRET
+    {
+        let restored = current
+            .telemetry
+            .as_ref()
+            .and_then(|t| t.credentials.as_ref())
+            .map(|(_, cp)| cp.clone())
+            .unwrap_or(pass);
+        tel.credentials = Some((user, restored));
     }
     incoming
 }
@@ -446,6 +454,115 @@ attach_groups = []
     }
 
     #[test]
+    fn gains_accept_numbers_and_reject_other_toml_types_without_values_in_errors() {
+        for key in ["rx_gain_lna", "tx_gain_dac"] {
+            let original = if key == "rx_gain_lna" { "48.0" } else { "0.0" };
+            for number in ["-12", "1.25"] {
+                let input = MS_TOML.replace(&format!("{key} = {original}"), &format!("{key} = {number}"));
+                assert!(from_toml_str(&input).is_ok());
+            }
+            for invalid in ["\"dummy-gain-secret\"", "true", "[1, 2]", "{ x = 1 }"] {
+                let input = MS_TOML.replace(&format!("{key} = {original}"), &format!("{key} = {invalid}"));
+                let error = from_toml_str(&input).unwrap_err();
+                assert_eq!(error.to_string(), "SoapySDR gain must be a number");
+                assert!(!config_error_summary(&input, error.as_ref()).contains("dummy-gain-secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn startup_validator_matches_portable_identity_and_combined_group_limits() {
+        for (original, replacement) in [
+            ("mcc = 901", "mcc = 65535"),
+            ("mnc = 9999", "mnc = 16384"),
+            ("location_area = 1", "location_area = 16384"),
+            ("attach_groups = []", "attach_groups = [16777216]"),
+        ] {
+            assert!(from_toml_str(&MS_TOML.replace(original, replacement)).is_err());
+        }
+        let boundary = MS_TOML
+            .replace("mcc = 901", "mcc = 1023")
+            .replace("mnc = 9999", "mnc = 16383")
+            .replace("location_area = 1", "location_area = 16383")
+            .replace("attach_groups = []", "attach_groups = [0, 16777215]");
+        assert!(from_toml_str(&boundary).is_ok());
+        let groups = (1..=63).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        let base = MS_TOML.replace("attach_groups = []", &format!("attach_groups = [{groups}]"));
+        let mut input = format!(
+            "{base}\n[[talkgroup]]\ngssi = 64\nname = \"extra\"\n\
+            [[scanlist]]\nname = \"active\"\ntalkgroups = [64]\nactive = true\n"
+        );
+        assert!(from_toml_str(&input).is_err());
+        input = input
+            .replace("gssi = 64", "gssi = 63")
+            .replace("talkgroups = [64]", "talkgroups = [63]");
+        assert_eq!(from_toml_str(&input).unwrap().initial_groups().unwrap().as_slice().len(), 63);
+    }
+
+    #[test]
+    fn all_codeplug_and_command_unknown_keys_are_rejected() {
+        for section in [
+            "[command]\nhost = \"localhost\"\nport = 9102\n",
+            "[[folder]]\nid = \"f\"\nname = \"f\"\n",
+            "[[talkgroup]]\ngssi = 1\nname = \"g\"\n",
+            "[[network]]\nmcc = 1\nmnc = 1\n",
+            "[[carrier_override]]\nname = \"c\"\ndl_freq = 439825000\n",
+            "[[frequency_list]]\nname = \"f\"\nfrequencies = [439825000]\n",
+            "[[frequency_list]]\nname = \"f\"\nmode = \"Range\"\n[frequency_list.range]\nband = 4\nstart_carrier = 1\nstop_carrier = 2\n",
+            "[[scanlist]]\nname = \"s\"\ntalkgroups = []\n",
+            "[[gateway]]\nid = \"g\"\nname = \"g\"\ngateway_issi = 1\n",
+            "[[contact]]\nname = \"c\"\nissi = 1\n",
+            "[codeplug]\n",
+            "[codeplug.home_display]\nenabled = true\n",
+        ] {
+            let error = from_toml_str(&format!("{MS_TOML}\n{section}typo = \"dummy-secret\"\n")).unwrap_err();
+            assert!(error.to_string().contains("Unrecognized fields"), "{section}: {error}");
+            assert!(!error.to_string().contains("dummy-secret"));
+        }
+    }
+
+    #[test]
+    fn legacy_cell_changes_are_structural_and_survive_canonical_write_back() {
+        let current = from_toml_str(MS_TOML).unwrap();
+        for incoming in [
+            MS_TOML.replace("location_area = 1", "location_area = 2"),
+            MS_TOML.replace("colour_code = 1", "colour_code = 2"),
+        ] {
+            let incoming = from_toml_str(&incoming).unwrap();
+            assert!(!is_operational_only_change(&current, &incoming));
+            let restored = from_toml_str(&to_toml_string(&incoming).unwrap()).unwrap();
+            assert_eq!(restored.cell, incoming.cell);
+        }
+        let restored = from_toml_str(&to_toml_string_redacted(&current).unwrap()).unwrap();
+        assert!(is_operational_only_change(&current, &restored));
+    }
+
+    #[test]
+    fn documented_toml_snippets_parse_and_radio_sections_validate() {
+        let base = "config_version = \"0.7\"\nstack_mode = \"Ms\"\n\
+            [phy_io]\nbackend = \"None\"\n[net_info]\nmcc = 901\nmnc = 9999\n\
+            [ms]\nissi = 1000001\nattach_groups = []\n";
+        for document in [
+            include_str!("../../../../docs/MS_CONFIG.md"),
+            include_str!("../../../../docs/MS_GETTING_STARTED.md"),
+        ] {
+            for section in document.split("```toml\n").skip(1) {
+                let snippet = section.split("```").next().unwrap();
+                let value: toml::Value = toml::from_str(snippet).expect("documented TOML syntax");
+                if value.get("audio").is_some() {
+                    continue; // External MMI schema, not radio configuration.
+                }
+                let companion = if snippet.contains("[[scanlist]]") {
+                    "\n[[talkgroup]]\ngssi = 101\nname = \"companion\"\n"
+                } else {
+                    ""
+                };
+                from_toml_str(&format!("{base}\n{snippet}{companion}")).expect("documented radio configuration");
+            }
+        }
+    }
+
+    #[test]
     fn to_toml_string_roundtrips_ms_config() {
         let cfg = from_toml_str(MS_TOML).expect("initial parse");
         let rendered = to_toml_string(&cfg).expect("serialize");
@@ -455,13 +572,7 @@ attach_groups = []
         assert_eq!(cfg.stack_mode, reparsed.stack_mode);
         assert_eq!(cfg.net.mcc, reparsed.net.mcc);
         assert_eq!(cfg.net.mnc, reparsed.net.mnc);
-        // A canonical MS config omits [cell_info] (cell identity/RF is learned
-        // over the air), so it is not part of the round-trip. Confirm the
-        // rendered output drops the section.
-        assert!(
-            !rendered.contains("[cell_info]"),
-            "MS config must not serialize a [cell_info] section"
-        );
+        assert_eq!(cfg.cell, reparsed.cell, "nondefault legacy seeds must survive write-back");
         let soapy_a = cfg.phy_io.soapysdr.as_ref().expect("soapy");
         let soapy_b = reparsed.phy_io.soapysdr.as_ref().expect("soapy reparsed");
         assert_eq!(soapy_a.dl_freq, soapy_b.dl_freq);
@@ -572,7 +683,7 @@ dwell_ms = 800
         let cfg = from_toml_str(MS_TOML_NO_FIXED_RF).expect("parse");
         let rendered = to_toml_string(&cfg).expect("serialize");
         // The seeded RX and unset UL must NOT be written back as fixed freqs,
-        // and the cell RF block must stay omitted.
+        // and unset cell RF fields must stay omitted (nondefault identity seeds survive).
         assert!(!rendered.contains("tx_freq"), "seeded RX must not serialize as tx_freq");
         assert!(!rendered.contains("rx_freq"), "unset UL must not serialize as rx_freq");
         assert!(!rendered.contains("main_carrier"), "MS cell RF must stay omitted");

@@ -21,7 +21,7 @@ pub struct FirComplexSym {
 
 impl FirComplexSym {
     pub fn new(half_length: usize) -> Self {
-        assert!(half_length % VECLEN == 0);
+        assert!(half_length.is_multiple_of(VECLEN));
         let len = half_length * 2;
         Self {
             half_length,

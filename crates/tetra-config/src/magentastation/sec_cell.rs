@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use toml::Value;
 
-/// Legacy MS seed values. Canonical codeplugs omit this section because the
-/// serving cell supplies its identity and RF parameters over the air.
-#[derive(Debug, Clone)]
+/// Optional legacy MS seed values. Nondefault seeds survive canonical write-back;
+/// the serving cell supplies current identity and RF parameters over the air.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CfgCellInfo {
     pub main_carrier: u16,
     pub freq_band: u8,
@@ -43,4 +43,21 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
         location_area: ci.location_area,
         colour_code: ci.colour_code.unwrap_or(0),
     }
+}
+
+pub fn cfg_to_cell_dto(cfg: &CfgCellInfo) -> Option<CellInfoDto> {
+    if cfg == &CfgCellInfo::default() {
+        return None;
+    }
+    Some(CellInfoDto {
+        main_carrier: (cfg.main_carrier != 0).then_some(cfg.main_carrier),
+        freq_band: (cfg.freq_band != 0).then_some(cfg.freq_band),
+        freq_offset: (cfg.freq_offset_hz != 0).then_some(cfg.freq_offset_hz),
+        duplex_spacing: (cfg.duplex_spacing_id != 0).then_some(cfg.duplex_spacing_id),
+        reverse_operation: cfg.reverse_operation.then_some(true),
+        custom_duplex_spacing: cfg.custom_duplex_spacing,
+        location_area: cfg.location_area,
+        colour_code: (cfg.colour_code != 0).then_some(cfg.colour_code),
+        extra: HashMap::new(),
+    })
 }

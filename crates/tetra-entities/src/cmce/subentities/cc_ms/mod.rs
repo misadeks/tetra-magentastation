@@ -1019,10 +1019,10 @@ mod tests {
         while let Some(m) = q.pop_front() {
             if let SapMsgInner::LcmcMleUnitdataReq(mut req) = m.msg {
                 req.sdu.seek(0);
-                if let Ok(raw) = req.sdu.read_field(5, "pdu_type") {
-                    if let Ok(t) = CmcePduTypeUl::try_from(raw) {
-                        out.push(t);
-                    }
+                if let Ok(raw) = req.sdu.read_field(5, "pdu_type")
+                    && let Ok(t) = CmcePduTypeUl::try_from(raw)
+                {
+                    out.push(t);
                 }
             }
         }

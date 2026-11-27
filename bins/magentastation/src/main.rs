@@ -41,10 +41,17 @@ const EXIT_RESTART: i32 = 75;
 
 /// Load configuration file
 fn load_config_from_toml(cfg_path: &str) -> StackConfig {
-    match parsing::from_file(cfg_path) {
+    let contents = std::fs::read_to_string(cfg_path).unwrap_or_else(|error| {
+        eprintln!("Failed to read configuration: {:?}", error.kind());
+        std::process::exit(1);
+    });
+    match parsing::from_toml_str(&contents) {
         Ok(c) => c,
         Err(e) => {
-            println!("Failed to load configuration from {}: {}", cfg_path, e);
+            eprintln!(
+                "Failed to load configuration: {}",
+                parsing::config_error_summary(&contents, e.as_ref())
+            );
             std::process::exit(1);
         }
     }
@@ -83,7 +90,10 @@ fn start_telemetry_worker(cfg: SharedConfig, telemetry_source: TelemetrySource) 
     })
 }
 
-fn start_control_worker(cfg: SharedConfig, command_dispatchers: HashMap<TetraEntity, CommandDispatcher>) -> thread::JoinHandle<()> {
+fn start_control_worker(
+    cfg: SharedConfig,
+    command_dispatchers: HashMap<TetraEntity, CommandDispatcher>,
+) -> thread::JoinHandle<Result<(), tetra_entities::network::transports::NetworkError>> {
     let config = cfg.config();
     let ccfg = config.control.as_ref().unwrap();
 
@@ -112,7 +122,7 @@ fn start_control_worker(cfg: SharedConfig, command_dispatchers: HashMap<TetraEnt
     thread::spawn(move || {
         let transport = WebSocketTransport::new(ws_config);
         let mut worker = ControlWorker::new(command_dispatchers, transport);
-        worker.run();
+        worker.run()
     })
 }
 
@@ -208,7 +218,6 @@ fn build_ms_stack(
     long_about = "Runs the MS-only TETRA MagentaStation stack using a TOML configuration. \
                   Only stack_mode = \"Ms\" is supported. Use backend = \"None\" for offline management."
 )]
-
 struct Args {
     /// Config file (required)
     #[arg(help = "TOML mobile-station configuration")]
@@ -240,12 +249,12 @@ fn main() {
     let (mut router, tsource, cdispatchers) = build_ms_stack(&mut cfg, &args.config, restart_requested.clone(), is_running.clone());
 
     // Start Telemetry and Control threads, if enabled
-    if let Some(telemetry_source) = tsource {
-        start_telemetry_worker(cfg.clone(), telemetry_source);
-    };
-    if cfg.config().control.is_some() {
-        start_control_worker(cfg.clone(), cdispatchers);
-    };
+    let telemetry_worker = tsource.map(|source| start_telemetry_worker(cfg.clone(), source));
+    let control_worker = cfg
+        .config()
+        .control
+        .as_ref()
+        .map(|_| start_control_worker(cfg.clone(), cdispatchers));
 
     // Set up Ctrl+C handler for graceful shutdown
     let is_running_clone = is_running.clone();
@@ -259,6 +268,18 @@ fn main() {
 
     // router drops here → entities are dropped, networked entities disconnect.
     drop(router);
+    if let Some(worker) = control_worker {
+        match worker.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!("Control shutdown completed with response delivery failure: {error}"),
+            Err(_) => tracing::error!("Control worker panicked during shutdown"),
+        }
+    }
+    if let Some(worker) = telemetry_worker
+        && worker.join().is_err()
+    {
+        tracing::error!("Telemetry worker panicked during shutdown");
+    }
 
     // If the MS management interface requested a config-apply restart, exit with
     // the documented restart code so the external supervisor respawns the stack
